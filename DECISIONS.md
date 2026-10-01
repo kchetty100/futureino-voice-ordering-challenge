@@ -156,7 +156,7 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 
 **Why:** The review will try a missing temperature, an item from the other machine, a yes after the cart changed, a quiet customer, and someone walking off. Those are tests on this module. An incomplete draft matches the way people order: "a latte", then "iced". Pinning confirm to a version stops a yes from landing on a cart they did not just hear.
 
-**Revisit:** The 20s and 45s timings after a test in a noisy room. The quantity cap if a real machine allows larger orders.
+**Revisit:** The 20s and 45s timings after a test in a noisy room. The quantity cap if a real machine allows larger orders. A confirmed order on the pay screen does not use this clock. The customer leaves it with New order.
 
 **How we checked:** `npm test` runs these cases against the catalog. No model is involved.
 
@@ -173,3 +173,19 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 **Why:** The touch path is how we show the engine is the only writer of the cart. A second cart would drift from those rules. A server roundtrip can wait until voice and touch have to share one order. Voice still needs a speech key.
 
 **Revisit:** Move this same session onto the server when the text agent is added. Adjust the bezel if a real machine resolution is specified.
+
+## 2026-10-01 — Text agent and server session
+
+**Decided:** The cart lives in an in-memory server session. Tap and type both call it, so they share one order. `POST /api/sessions` opens a machine. `POST /api/sessions/:id` sends a touch command. `POST /api/sessions/:id/message` sends typed text. The agent may search the menu and draft a line. It has no confirm tool. A clear yes or no is handled in code before any model runs, and only a clear yes calls `confirm` with the cart version on screen. The words on screen are built from the engine result. If `OPENAI_API_KEY` is missing, or the model call fails, the same rules answer. The key stays in server env.
+
+**Alternatives:**
+
+- Let the model write the cart and the confirmation from free text.
+- Keep the session in the browser and send a copy to the agent.
+- Require an API key before the typed path works.
+
+**Why:** The review will try a yes after a change, a missing item, and an allergen question. A model that can confirm by wording can put a drink in the order the customer did not accept. A browser cart and a server cart would diverge. The rules path is what the tests run, so the demo still works with no key.
+
+**Revisit:** The in-memory map does not survive a restart or a second server instance. Move it when we deploy. English reply templates stay until voice needs other languages. The model, if a key is present, is `gpt-4o-mini` and only through the same tools.
+
+**How we checked:** `npm test` covers the typed cases with the rules agent. The kiosk posts to the session API.

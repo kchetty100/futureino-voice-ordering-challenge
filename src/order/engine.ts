@@ -167,6 +167,7 @@ export function apply(session: OrderSession, command: OrderCommand): ApplyResult
 }
 
 function applyTick(session: OrderSession, now: number): ApplyResult {
+  if (session.phase === "ready_to_pay") return ok(session);
   const elapsed = now - session.lastActivityAt;
   if (elapsed >= IDLE_ABANDON_MS) {
     return ok(abandon(session));

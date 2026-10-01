@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   getItem,
   itemsForMachine,
@@ -9,14 +9,7 @@ import {
   type MachineId,
   type Temperature,
 } from "../catalog/index";
-import {
-  apply,
-  createSession,
-  type OrderInput,
-  type OrderSession,
-  type ReadBack,
-  type RejectReason,
-} from "../order/engine";
+import { type OrderInput, type OrderSession, type ReadBack } from "../order/engine";
 import styles from "./kiosk.module.css";
 
 type Stage = "attract" | "machines";
@@ -28,23 +21,17 @@ const TEMPS: { id: Temperature; label: string; hint: string }[] = [
   { id: "room", label: "Room", hint: "No heat" },
 ];
 
-const REASONS: Record<RejectReason, string> = {
-  session_abandoned: "This order was cleared.",
-  unknown_product: "That item is not on this machine.",
-  wrong_machine: "That item is not on this machine.",
-  invalid_quantity: "Choose a quantity from 1 to 9.",
-  invalid_temperature: "Choose hot, iced, or room.",
-  temperature_not_allowed: "Snacks do not take a temperature.",
-  unknown_line: "That line is no longer in the cart.",
-  cart_empty: "Add something first.",
-  incomplete: "Choose hot, iced, or room temperature first.",
-  not_awaiting_confirmation: "Review the order before confirming.",
-  stale_cart: "That order changed. Review it again.",
-};
-
 function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 }
+
+type ServerState = {
+  session: OrderSession;
+  readBack: ReadBack | null;
+  say: string | null;
+  notice: string | null;
+  spotlightIds: string[];
+};
 
 export function Kiosk() {
   const [stage, setStage] = useState<Stage>("attract");
@@ -52,15 +39,37 @@ export function Kiosk() {
   const [readBack, setReadBack] = useState<ReadBack | null>(null);
   const [picker, setPicker] = useState<Picker | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [say, setSay] = useState<string | null>(null);
+  const [spotlightIds, setSpotlightIds] = useState<string[]>([]);
+  const requestSeq = useRef(0);
+
+  async function post(url: string, body: unknown, tick = false): Promise<ServerState | null> {
+    const mine = tick ? requestSeq.current : ++requestSeq.current;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      if (!tick && mine === requestSeq.current) setNotice("The machine missed that. Try again.");
+      return null;
+    }
+    const state = (await response.json()) as ServerState;
+    if (mine !== requestSeq.current) return state;
+    setSession(state.session);
+    setReadBack(state.readBack);
+    if (tick) return state;
+    setNotice(state.notice);
+    setSay(state.say);
+    setSpotlightIds(state.spotlightIds);
+    return state;
+  }
 
   useEffect(() => {
     if (!session || session.phase === "abandoned") return;
+    const id = session.id;
     const timer = window.setInterval(() => {
-      setSession((current) => {
-        if (!current || current.phase === "abandoned") return current;
-        const next = apply(current, { type: "tick", now: Date.now() }).session;
-        return next === current ? current : next;
-      });
+      void post(`/api/sessions/${id}`, { type: "tick" }, true);
     }, 1000);
     return () => window.clearInterval(timer);
   }, [session?.id, session?.phase]);
@@ -72,23 +81,18 @@ export function Kiosk() {
     setReadBack(null);
     setPicker(null);
     setNotice(null);
+    setSay(null);
+    setSpotlightIds([]);
   }, [session]);
 
-  function run(current: OrderSession, command: OrderInput) {
-    const result = apply(current, { ...command, now: Date.now() });
-    setSession(result.session);
-    setNotice(result.ok ? null : REASONS[result.reason ?? "cart_empty"]);
-    if (result.readBack) setReadBack(result.readBack);
-    if (command.type === "revise") setReadBack(null);
-    return result;
+  function run(command: OrderInput) {
+    if (!session) return Promise.resolve(null);
+    return post(`/api/sessions/${session.id}`, command);
   }
 
-  function start(machineId: MachineId) {
-    setSession(createSession({ id: crypto.randomUUID(), machineId, now: Date.now() }));
-    setReadBack(null);
+  async function start(machineId: MachineId) {
     setPicker(null);
-    setNotice(null);
-    setStage("attract");
+    await post("/api/sessions", { machineId });
   }
 
   function cancel() {
@@ -97,7 +101,13 @@ export function Kiosk() {
       setStage("attract");
       return;
     }
-    run(session, { type: "cancel" });
+    void run({ type: "cancel" });
+  }
+
+  function send(text: string) {
+    if (!session) return;
+    setPicker(null);
+    void post(`/api/sessions/${session.id}/message`, { text });
   }
 
   const ended = !session || session.phase === "abandoned";
@@ -115,7 +125,9 @@ export function Kiosk() {
     body = (
       <Pay
         readBack={readBack}
-        onChange={() => run(session, { type: "revise" })}
+        say={say}
+        onSend={send}
+        onChange={() => void run({ type: "revise" })}
         onNew={cancel}
       />
     );
@@ -124,14 +136,16 @@ export function Kiosk() {
       <Review
         readBack={readBack}
         notice={notice}
+        say={say}
+        onSend={send}
         onConfirm={() =>
-          run(session, {
+          void run({
             type: "confirm",
             cartVersion: readBack.cartVersion,
             source: "confirm_tap",
           })
         }
-        onChange={() => run(session, { type: "revise" })}
+        onChange={() => void run({ type: "revise" })}
       />
     );
   } else {
@@ -139,12 +153,16 @@ export function Kiosk() {
       <Menu
         session={session}
         notice={notice}
+        say={say}
+        spotlightIds={spotlightIds}
+        onSend={send}
         onCancel={cancel}
         onPick={(productId) => setPicker({ productId })}
         onEditTemp={(lineId, productId) => setPicker({ lineId, productId })}
-        onQuantity={(lineId, quantity) => run(session, { type: "set_quantity", lineId, quantity })}
-        onRemove={(lineId) => run(session, { type: "remove_line", lineId })}
-        onReview={() => run(session, { type: "read_back" })}
+        onQuantity={(lineId, quantity) => void run({ type: "set_quantity", lineId, quantity })}
+        onSetTemp={(lineId, temperature) => void run({ type: "set_temperature", lineId, temperature })}
+        onRemove={(lineId) => void run({ type: "remove_line", lineId })}
+        onReview={() => void run({ type: "read_back" })}
       />
     );
   }
@@ -159,35 +177,37 @@ export function Kiosk() {
             lineId={picker?.lineId}
             session={session}
             onClose={() => {
-              run(session, { type: "activity" });
+              void run({ type: "activity" });
               setPicker(null);
             }}
             onAdd={(temperature) => {
-              if (picker?.lineId) {
-                if (!temperature) return;
-                const saved = run(session, {
-                  type: "set_temperature",
-                  lineId: picker.lineId,
-                  temperature,
+              void (async () => {
+                if (picker?.lineId) {
+                  if (!temperature) return;
+                  const saved = await run({
+                    type: "set_temperature",
+                    lineId: picker.lineId,
+                    temperature,
+                  });
+                  if (saved && !saved.notice) setPicker(null);
+                  return;
+                }
+                const added = await run({
+                  type: "add",
+                  productId: item.id,
+                  ...(temperature ? { temperature } : {}),
                 });
-                if (saved.ok) setPicker(null);
-                return;
-              }
-              const added = run(session, {
-                type: "add",
-                productId: item.id,
-                ...(temperature ? { temperature } : {}),
-              });
-              if (added.ok) setPicker(null);
+                if (added && !added.notice) setPicker(null);
+              })();
             }}
           />
         ) : null}
-        {session && session.idlePrompted && session.phase !== "abandoned" ? (
+        {session && session.idlePrompted && session.phase !== "abandoned" && session.phase !== "ready_to_pay" ? (
           <div className={styles.idle} role="dialog" aria-labelledby="idle-title">
             <div className={styles.idleCard}>
               <h2 id="idle-title">Still there?</h2>
               <p className={styles.summary}>The order will clear if nobody is at the machine.</p>
-              <button type="button" className={styles.primary} onClick={() => run(session, { type: "activity" })}>
+              <button type="button" className={styles.primary} onClick={() => void run({ type: "activity" })}>
                 I'm here
               </button>
               <button type="button" className={styles.ghost} onClick={cancel}>
@@ -246,19 +266,27 @@ function MachineChoice({
 function Menu({
   session,
   notice,
+  say,
+  spotlightIds,
+  onSend,
   onCancel,
   onPick,
   onEditTemp,
   onQuantity,
+  onSetTemp,
   onRemove,
   onReview,
 }: {
   session: OrderSession;
   notice: string | null;
+  say: string | null;
+  spotlightIds: string[];
+  onSend: (text: string) => void;
   onCancel: () => void;
   onPick: (productId: string) => void;
   onEditTemp: (lineId: string, productId: string) => void;
   onQuantity: (lineId: string, quantity: number) => void;
+  onSetTemp: (lineId: string, temperature: Temperature) => void;
   onRemove: (lineId: string) => void;
   onReview: () => void;
 }) {
@@ -279,9 +307,19 @@ function Menu({
           Start over
         </button>
       </header>
+      {say ? (
+        <p className={styles.say} role="status">
+          {say}
+        </p>
+      ) : null}
       <div className={styles.grid}>
         {products.map((product) => (
-          <button key={product.id} type="button" className={styles.card} onClick={() => onPick(product.id)}>
+          <button
+            key={product.id}
+            type="button"
+            className={spotlightIds.includes(product.id) ? `${styles.card} ${styles.spot}` : styles.card}
+            onClick={() => onPick(product.id)}
+          >
             <img src={`/${product.imagePath}`} alt="" />
             <span className={styles.cardName}>{product.name}</span>
             <span className={styles.cardPrice}>{money(product.priceCents)}</span>
@@ -301,13 +339,23 @@ function Menu({
                   {line.quantity > 1 ? ` × ${line.quantity}` : ""}
                 </strong>
                 <span className={styles.price}>{money(unit * line.quantity)}</span>
-                <span className={styles.meta}>
-                  {line.temperature ? TEMPS.find((temp) => temp.id === line.temperature)?.label : product?.summary}
-                </span>
-                {missing.has(line.lineId) ? (
-                  <button type="button" className={styles.needed} onClick={() => onEditTemp(line.lineId, line.productId)}>
-                    Choose temperature
+                {line.temperature ? (
+                  <button
+                    type="button"
+                    className={styles.meta}
+                    onClick={() => onEditTemp(line.lineId, line.productId)}
+                  >
+                    {TEMPS.find((temp) => temp.id === line.temperature)?.label}
                   </button>
+                ) : null}
+                {missing.has(line.lineId) ? (
+                  <div className={styles.tempPick} role="group" aria-label={`Temperature for ${product?.name ?? "drink"}`}>
+                    {TEMPS.map((temp) => (
+                      <button key={temp.id} type="button" onClick={() => onSetTemp(line.lineId, temp.id)}>
+                        {temp.label}
+                      </button>
+                    ))}
+                  </div>
                 ) : null}
                 <div className={styles.qty}>
                   <button
@@ -340,8 +388,9 @@ function Menu({
             {notice}
           </p>
         ) : null}
+        <Composer onSend={onSend} />
         <button type="button" className={styles.primary} onClick={onReview} disabled={count === 0 || missing.size > 0}>
-          {missing.size > 0 ? "Choose a temperature" : count === 0 ? "Review order" : `Review order · ${money(cartTotal(session))}`}
+          {count === 0 ? "Review order" : `Review order · ${money(cartTotal(session))}`}
         </button>
       </footer>
     </>
@@ -408,11 +457,15 @@ function ProductSheet({
 function Review({
   readBack,
   notice,
+  say,
+  onSend,
   onConfirm,
   onChange,
 }: {
   readBack: ReadBack;
   notice: string | null;
+  say: string | null;
+  onSend: (text: string) => void;
   onConfirm: () => void;
   onChange: () => void;
 }) {
@@ -421,6 +474,11 @@ function Review({
       <div>
         <p className={styles.kicker}>Check this order</p>
         <h1 className={styles.title}>Is this right?</h1>
+        {say ? (
+          <p className={styles.say} role="status">
+            {say}
+          </p>
+        ) : null}
         <ul className={styles.reviewList}>
           {readBack.lines.map((line) => (
             <li key={line.lineId}>
@@ -448,6 +506,7 @@ function Review({
             {notice}
           </p>
         ) : null}
+        <Composer onSend={onSend} />
         <button type="button" className={styles.primary} onClick={onConfirm}>
           Confirm order
         </button>
@@ -461,10 +520,14 @@ function Review({
 
 function Pay({
   readBack,
+  say,
+  onSend,
   onChange,
   onNew,
 }: {
   readBack: ReadBack;
+  say: string | null;
+  onSend: (text: string) => void;
   onChange: () => void;
   onNew: () => void;
 }) {
@@ -475,6 +538,11 @@ function Pay({
         <h1 className={styles.title}>Pay at the terminal</h1>
         <p className={styles.payTotal}>{money(readBack.totalCents)}</p>
         <p className={styles.summary}>This demo stops here. Nothing is charged.</p>
+        {say ? (
+          <p className={styles.say} role="status">
+            {say}
+          </p>
+        ) : null}
         <ul className={styles.reviewList}>
           {readBack.lines.map((line) => (
             <li key={line.lineId}>
@@ -489,6 +557,7 @@ function Pay({
         </ul>
       </div>
       <div className={styles.stack}>
+        <Composer onSend={onSend} />
         <button type="button" className={styles.ghost} onClick={onChange}>
           Change order
         </button>
@@ -497,6 +566,32 @@ function Pay({
         </button>
       </div>
     </div>
+  );
+}
+
+function Composer({ onSend }: { onSend: (text: string) => void }) {
+  const [text, setText] = useState("");
+  return (
+    <form
+      className={styles.composer}
+      onSubmit={(event) => {
+        event.preventDefault();
+        const value = text.trim();
+        if (!value) return;
+        setText("");
+        onSend(value);
+      }}
+    >
+      <input
+        aria-label="Type your order"
+        placeholder="Type your order"
+        value={text}
+        onChange={(event) => setText(event.target.value)}
+      />
+      <button type="submit" className={styles.send}>
+        Send
+      </button>
+    </form>
   );
 }
 

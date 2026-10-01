@@ -213,6 +213,18 @@ describe("order engine", () => {
     assert.equal(left.session.lines.length, 0);
     assert.equal(left.idlePrompt, false);
 
+    const paid = apply(prompt.session, { type: "read_back", now: IDLE_PROMPT_MS });
+    const confirmed = apply(paid.session, {
+      type: "confirm",
+      cartVersion: paid.session.cartVersion,
+      source: "confirm_tap",
+      now: IDLE_PROMPT_MS,
+    });
+    const stayed = apply(confirmed.session, { type: "tick", now: IDLE_PROMPT_MS + IDLE_ABANDON_MS });
+    assert.equal(stayed.session.phase, "ready_to_pay");
+    assert.equal(stayed.session.lines.length, 1);
+    assert.equal(stayed.idlePrompt, false);
+
     const lateYes = apply(left.session, {
       type: "confirm",
       cartVersion: added.session.cartVersion,
