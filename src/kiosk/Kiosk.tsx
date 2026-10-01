@@ -26,11 +26,14 @@ function money(cents: number): string {
 }
 
 type ServerState = {
-  session: OrderSession;
+  session: OrderSession | null;
   readBack: ReadBack | null;
   say: string | null;
   notice: string | null;
   spotlightIds: string[];
+  switchTo?: MachineId | null;
+  transcript?: string | null;
+  audioBase64?: string | null;
 };
 
 export function Kiosk() {
@@ -40,15 +43,78 @@ export function Kiosk() {
   const [picker, setPicker] = useState<Picker | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [say, setSay] = useState<string | null>(null);
+  const [heard, setHeard] = useState<string | null>(null);
+  const [speaking, setSpeaking] = useState(false);
   const [spotlightIds, setSpotlightIds] = useState<string[]>([]);
+  const [menu, setMenu] = useState<MachineId | null>(null);
+  const [showMenu, setShowMenu] = useState(false);
   const requestSeq = useRef(0);
+  const liveSessionId = useRef<string | null>(null);
+  const seenActivity = useRef(0);
+  const seenCart = useRef(0);
+  const audioCtx = useRef<AudioContext | null>(null);
+  const voice = useRef<AudioBufferSourceNode | null>(null);
+  const speakingNow = useRef(false);
+
+  function audioContext(): AudioContext {
+    if (!audioCtx.current) audioCtx.current = new AudioContext();
+    return audioCtx.current;
+  }
+
+  function stopPlayback() {
+    speakingNow.current = false;
+    const source = voice.current;
+    voice.current = null;
+    if (source) {
+      source.onended = null;
+      try {
+        source.stop();
+      } catch {
+        // Already stopped.
+      }
+    }
+    setSpeaking(false);
+  }
+
+  function armAudio() {
+    const context = audioContext();
+    void context.resume();
+  }
+
+  async function play(base64: string) {
+    stopPlayback();
+    speakingNow.current = true;
+    setSpeaking(true);
+    try {
+      const context = audioContext();
+      await context.resume();
+      const binary = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+      const buffer = await context.decodeAudioData(binary.buffer.slice(0));
+      const source = context.createBufferSource();
+      source.buffer = buffer;
+      source.connect(context.destination);
+      source.onended = () => {
+        if (voice.current === source) {
+          voice.current = null;
+          speakingNow.current = false;
+          setSpeaking(false);
+        }
+      };
+      voice.current = source;
+      source.start();
+    } catch {
+      speakingNow.current = false;
+      setSpeaking(false);
+    }
+  }
 
   async function post(url: string, body: unknown, tick = false): Promise<ServerState | null> {
     const mine = tick ? requestSeq.current : ++requestSeq.current;
+    const isAudio = body instanceof FormData;
     const response = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
+      headers: isAudio ? undefined : { "content-type": "application/json" },
+      body: isAudio ? body : JSON.stringify(body),
     });
     if (!response.ok) {
       if (!tick && mine === requestSeq.current) setNotice("The machine missed that. Try again.");
@@ -56,12 +122,32 @@ export function Kiosk() {
     }
     const state = (await response.json()) as ServerState;
     if (mine !== requestSeq.current) return state;
-    setSession(state.session);
-    setReadBack(state.readBack);
-    if (tick) return state;
+    const nextSession = state.session;
+    if (nextSession && !isNewerSession(nextSession, tick)) return state;
+    if (state.switchTo) {
+      setMenu(state.switchTo);
+      setShowMenu(true);
+    } else if (!tick && state.readBack && (nextSession?.phase === "awaiting_confirmation" || nextSession?.phase === "ready_to_pay")) {
+      setShowMenu(false);
+    }
+    if (tick) {
+      if (nextSession && liveSessionId.current === nextSession.id) {
+        setSession(nextSession);
+        setReadBack(state.readBack);
+      }
+      return state;
+    }
+    if (nextSession) {
+      liveSessionId.current = nextSession.id;
+      setSession(nextSession);
+    }
+    setReadBack(state.switchTo ? null : state.readBack);
     setNotice(state.notice);
     setSay(state.say);
     setSpotlightIds(state.spotlightIds);
+    setHeard(typeof state.transcript === "string" && state.transcript ? state.transcript : null);
+    if (state.audioBase64) void play(state.audioBase64);
+    else stopPlayback();
     return state;
   }
 
@@ -76,14 +162,30 @@ export function Kiosk() {
 
   useEffect(() => {
     if (session?.phase !== "abandoned") return;
+    liveSessionId.current = null;
+    seenActivity.current = 0;
+    seenCart.current = 0;
     setSession(null);
+    setMenu(null);
+    setShowMenu(false);
     setStage("attract");
     setReadBack(null);
     setPicker(null);
     setNotice(null);
     setSay(null);
+    setHeard(null);
     setSpotlightIds([]);
+    stopPlayback();
   }, [session]);
+
+  function isNewerSession(next: OrderSession, tick: boolean): boolean {
+    if (liveSessionId.current && next.id !== liveSessionId.current) return false;
+    if (!liveSessionId.current && tick) return false;
+    if (next.lastActivityAt < seenActivity.current || next.cartVersion < seenCart.current) return false;
+    seenActivity.current = next.lastActivityAt;
+    seenCart.current = next.cartVersion;
+    return true;
+  }
 
   function run(command: OrderInput) {
     if (!session) return Promise.resolve(null);
@@ -91,13 +193,21 @@ export function Kiosk() {
   }
 
   async function start(machineId: MachineId) {
+    requestSeq.current += 1;
+    liveSessionId.current = null;
+    seenActivity.current = 0;
+    seenCart.current = 0;
     setPicker(null);
+    setMenu(machineId);
+    setShowMenu(true);
     await post("/api/sessions", { machineId });
   }
 
   function cancel() {
     if (!session || session.phase === "abandoned") {
       setSession(null);
+      setMenu(null);
+      setShowMenu(false);
       setStage("attract");
       return;
     }
@@ -110,6 +220,24 @@ export function Kiosk() {
     void post(`/api/sessions/${session.id}/message`, { text });
   }
 
+  function sendClip(blob: Blob) {
+    setPicker(null);
+    const body = new FormData();
+    const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";
+    body.append("audio", blob, `talk.${ext}`);
+    if (!session) return post("/api/arrive", body);
+    return post(`/api/sessions/${session.id}/speech`, body);
+  }
+
+  const talk = useConversation({
+    enabled: session === null || session.phase !== "abandoned",
+    onClip: sendClip,
+    onArm: armAudio,
+    onStop: stopPlayback,
+    onMiss: setNotice,
+    isSpeaking: () => speakingNow.current,
+  });
+
   const ended = !session || session.phase === "abandoned";
   const item = picker ? getItem(picker.productId) : undefined;
 
@@ -117,26 +245,49 @@ export function Kiosk() {
   if (ended) {
     body =
       stage === "machines" ? (
-        <MachineChoice onBack={() => setStage("attract")} onStart={start} />
+        <MachineChoice
+          say={say}
+          heard={heard}
+          speaking={speaking}
+          talkPhase={talk.phase}
+          onToggleTalk={talk.toggle}
+          onBack={() => setStage("attract")}
+          onStart={start}
+        />
       ) : (
-        <Attract onStart={() => setStage("machines")} />
+        <Attract
+          say={say}
+          heard={heard}
+          speaking={speaking}
+          talkPhase={talk.phase}
+          onToggleTalk={talk.toggle}
+          onStart={() => setStage("machines")}
+        />
       );
   } else if (session.phase === "ready_to_pay" && readBack) {
     body = (
       <Pay
         readBack={readBack}
         say={say}
+        heard={heard}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        onToggleTalk={talk.toggle}
         onSend={send}
         onChange={() => void run({ type: "revise" })}
         onNew={cancel}
       />
     );
-  } else if (session.phase === "awaiting_confirmation" && readBack) {
+  } else if (!showMenu && session.phase === "awaiting_confirmation" && readBack) {
     body = (
       <Review
         readBack={readBack}
         notice={notice}
         say={say}
+        heard={heard}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        onToggleTalk={talk.toggle}
         onSend={send}
         onConfirm={() =>
           void run({
@@ -150,10 +301,16 @@ export function Kiosk() {
     );
   } else {
     body = (
-      <Menu
-        session={session}
+          <Menu
+            session={session}
+            menu={menu ?? session.machineId}
+            onMenu={setMenu}
         notice={notice}
         say={say}
+        heard={heard}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        onToggleTalk={talk.toggle}
         spotlightIds={spotlightIds}
         onSend={send}
         onCancel={cancel}
@@ -221,12 +378,28 @@ export function Kiosk() {
   );
 }
 
-function Attract({ onStart }: { onStart: () => void }) {
+function Attract({
+  say,
+  heard,
+  speaking,
+  talkPhase,
+  onToggleTalk,
+  onStart,
+}: {
+  say: string | null;
+  heard: string | null;
+  speaking: boolean;
+  talkPhase: TalkPhase;
+  onToggleTalk: () => void;
+  onStart: () => void;
+}) {
   return (
     <div className={styles.attract}>
       <img className={styles.logo} src="/brand/futureino-logo-trimmed.png" alt="Futureino" />
       <div className={styles.stack}>
         <p className={styles.attractCopy}>Boost Coffee and Snacks Bot</p>
+        <Reply say={say} heard={heard} />
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
         <button type="button" className={styles.primary} onClick={onStart}>
           Tap to start
         </button>
@@ -236,9 +409,19 @@ function Attract({ onStart }: { onStart: () => void }) {
 }
 
 function MachineChoice({
+  say,
+  heard,
+  speaking,
+  talkPhase,
+  onToggleTalk,
   onBack,
   onStart,
 }: {
+  say: string | null;
+  heard: string | null;
+  speaking: boolean;
+  talkPhase: TalkPhase;
+  onToggleTalk: () => void;
   onBack: () => void;
   onStart: (machineId: MachineId) => void;
 }) {
@@ -247,8 +430,10 @@ function MachineChoice({
       <div>
         <p className={styles.kicker}>Choose a machine</p>
         <h1 className={styles.title}>What are you at?</h1>
+        <Reply say={say} heard={heard} />
       </div>
       <div className={styles.stack}>
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
         {(Object.keys(MACHINES) as MachineId[]).map((id) => (
           <button key={id} type="button" className={styles.machine} onClick={() => onStart(id)}>
             <strong>{MACHINES[id].name}</strong>
@@ -265,8 +450,14 @@ function MachineChoice({
 
 function Menu({
   session,
+  menu,
+  onMenu,
   notice,
   say,
+  heard,
+  speaking,
+  talkPhase,
+  onToggleTalk,
   spotlightIds,
   onSend,
   onCancel,
@@ -278,8 +469,14 @@ function Menu({
   onReview,
 }: {
   session: OrderSession;
+  menu: MachineId;
+  onMenu: (machineId: MachineId) => void;
   notice: string | null;
   say: string | null;
+  heard: string | null;
+  speaking: boolean;
+  talkPhase: TalkPhase;
+  onToggleTalk: () => void;
   spotlightIds: string[];
   onSend: (text: string) => void;
   onCancel: () => void;
@@ -290,7 +487,7 @@ function Menu({
   onRemove: (lineId: string) => void;
   onReview: () => void;
 }) {
-  const products = itemsForMachine(session.machineId);
+  const products = itemsForMachine(menu);
   const missing = new Set(
     session.lines.filter((line) => getItem(line.productId)?.requiresTemperature && !line.temperature).map((line) => line.lineId),
   );
@@ -301,17 +498,26 @@ function Menu({
       <header className={styles.topbar}>
         <div>
           <p>Futureino</p>
-          <h2>{MACHINES[session.machineId].name}</h2>
+          <h2>{MACHINES[menu].name}</h2>
+          <div className={styles.menus}>
+            {(Object.keys(MACHINES) as MachineId[]).map((id) => (
+              <button
+                key={id}
+                type="button"
+                className={id === menu ? styles.menuOn : styles.menuOff}
+                aria-pressed={id === menu}
+                onClick={() => onMenu(id)}
+              >
+                {MACHINES[id].name}
+              </button>
+            ))}
+          </div>
         </div>
         <button type="button" className={styles.linkish} onClick={onCancel}>
           Start over
         </button>
       </header>
-      {say ? (
-        <p className={styles.say} role="status">
-          {say}
-        </p>
-      ) : null}
+      <Reply say={say} heard={heard} />
       <div className={styles.grid}>
         {products.map((product) => (
           <button
@@ -388,6 +594,7 @@ function Menu({
             {notice}
           </p>
         ) : null}
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
         <Composer onSend={onSend} />
         <button type="button" className={styles.primary} onClick={onReview} disabled={count === 0 || missing.size > 0}>
           {count === 0 ? "Review order" : `Review order · ${money(cartTotal(session))}`}
@@ -458,6 +665,10 @@ function Review({
   readBack,
   notice,
   say,
+  heard,
+  speaking,
+  talkPhase,
+  onToggleTalk,
   onSend,
   onConfirm,
   onChange,
@@ -465,6 +676,10 @@ function Review({
   readBack: ReadBack;
   notice: string | null;
   say: string | null;
+  heard: string | null;
+  speaking: boolean;
+  talkPhase: TalkPhase;
+  onToggleTalk: () => void;
   onSend: (text: string) => void;
   onConfirm: () => void;
   onChange: () => void;
@@ -473,12 +688,8 @@ function Review({
     <div className={styles.review}>
       <div>
         <p className={styles.kicker}>Check this order</p>
-        <h1 className={styles.title}>Is this right?</h1>
-        {say ? (
-          <p className={styles.say} role="status">
-            {say}
-          </p>
-        ) : null}
+        <h1 className={styles.title}>Add anything else, or confirm?</h1>
+        <Reply say={say} heard={heard} />
         <ul className={styles.reviewList}>
           {readBack.lines.map((line) => (
             <li key={line.lineId}>
@@ -506,6 +717,7 @@ function Review({
             {notice}
           </p>
         ) : null}
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
         <Composer onSend={onSend} />
         <button type="button" className={styles.primary} onClick={onConfirm}>
           Confirm order
@@ -521,12 +733,20 @@ function Review({
 function Pay({
   readBack,
   say,
+  heard,
+  speaking,
+  talkPhase,
+  onToggleTalk,
   onSend,
   onChange,
   onNew,
 }: {
   readBack: ReadBack;
   say: string | null;
+  heard: string | null;
+  speaking: boolean;
+  talkPhase: TalkPhase;
+  onToggleTalk: () => void;
   onSend: (text: string) => void;
   onChange: () => void;
   onNew: () => void;
@@ -538,11 +758,7 @@ function Pay({
         <h1 className={styles.title}>Pay at the terminal</h1>
         <p className={styles.payTotal}>{money(readBack.totalCents)}</p>
         <p className={styles.summary}>This demo stops here. Nothing is charged.</p>
-        {say ? (
-          <p className={styles.say} role="status">
-            {say}
-          </p>
-        ) : null}
+        <Reply say={say} heard={heard} />
         <ul className={styles.reviewList}>
           {readBack.lines.map((line) => (
             <li key={line.lineId}>
@@ -557,6 +773,7 @@ function Pay({
         </ul>
       </div>
       <div className={styles.stack}>
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
         <Composer onSend={onSend} />
         <button type="button" className={styles.ghost} onClick={onChange}>
           Change order
@@ -567,6 +784,185 @@ function Pay({
       </div>
     </div>
   );
+}
+
+function Reply({ say, heard }: { say: string | null; heard: string | null }) {
+  if (!say && !heard) return null;
+  return (
+    <div className={styles.say} role="status">
+      {heard ? <p className={styles.heard}>You said: {heard}</p> : null}
+      {say ? <p className={styles.sayLine}>{say}</p> : null}
+    </div>
+  );
+}
+
+type TalkPhase = "off" | "listening" | "thinking";
+
+function useConversation(opts: {
+  enabled: boolean;
+  onClip: (blob: Blob) => Promise<unknown>;
+  onArm: () => void;
+  onStop: () => void;
+  onMiss: (text: string) => void;
+  isSpeaking: () => boolean;
+}) {
+  const optsRef = useRef(opts);
+  optsRef.current = opts;
+  const live = useRef(false);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [phase, setPhase] = useState<TalkPhase>("off");
+
+  function closeMic() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }
+
+  function end() {
+    live.current = false;
+    setPhase("off");
+    closeMic();
+    optsRef.current.onStop();
+  }
+
+  async function loop() {
+    optsRef.current.onArm();
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true },
+      });
+    } catch {
+      live.current = false;
+      setPhase("off");
+      optsRef.current.onMiss("The microphone is blocked. Allow it and tap Talk again.");
+      return;
+    }
+    if (!live.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+    streamRef.current = stream;
+    while (live.current) {
+      setPhase("listening");
+      const blob = await captureUtterance(stream, () => live.current);
+      if (!live.current) break;
+      if (!blob) continue;
+      setPhase("thinking");
+      await optsRef.current.onClip(blob);
+      while (live.current && optsRef.current.isSpeaking()) {
+        await wait(80);
+      }
+    }
+    stream.getTracks().forEach((track) => track.stop());
+    if (streamRef.current === stream) streamRef.current = null;
+    if (!live.current) setPhase("off");
+  }
+
+  function toggle() {
+    if (live.current) {
+      end();
+      return;
+    }
+    live.current = true;
+    setPhase("listening");
+    void loop();
+  }
+
+  useEffect(() => {
+    if (!opts.enabled && live.current) end();
+  }, [opts.enabled]);
+
+  useEffect(() => {
+    return () => {
+      live.current = false;
+      closeMic();
+    };
+  }, []);
+
+  return { phase, toggle };
+}
+
+function Talk({ phase, speaking, onToggle }: { phase: TalkPhase; speaking: boolean; onToggle: () => void }) {
+  const live = phase !== "off";
+  const label = !live ? "Talk" : speaking ? "Speaking… tap to end" : phase === "thinking" ? "One moment… tap to end" : "Listening… tap to end";
+  return (
+    <button
+      type="button"
+      className={live ? `${styles.talk} ${styles.talkLive}` : styles.talk}
+      aria-pressed={live}
+      onClick={onToggle}
+    >
+      {label}
+    </button>
+  );
+}
+
+function wait(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+/** Record until the customer pauses. Returns null when the pause had no speech. */
+function captureUtterance(stream: MediaStream, live: () => boolean): Promise<Blob | null> {
+  const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
+  const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+  const chunks: Blob[] = [];
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0) chunks.push(event.data);
+  };
+  const context = new AudioContext();
+  const source = context.createMediaStreamSource(stream);
+  const analyser = context.createAnalyser();
+  analyser.fftSize = 2048;
+  source.connect(analyser);
+  const bins = new Uint8Array(analyser.fftSize);
+  recorder.start(200);
+
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let heardAt: number | null = null;
+    let lastVoice = 0;
+    const timer = window.setInterval(() => {
+      if (!live() || recorder.state === "inactive") {
+        window.clearInterval(timer);
+        finish(false);
+        return;
+      }
+      analyser.getByteTimeDomainData(bins);
+      let sum = 0;
+      for (const value of bins) {
+        const sample = (value - 128) / 128;
+        sum += sample * sample;
+      }
+      const level = Math.sqrt(sum / bins.length);
+      const now = Date.now();
+      if (level >= 0.02) {
+        if (heardAt === null) heardAt = now;
+        lastVoice = now;
+      }
+      const spoke = heardAt !== null && now - heardAt > 280;
+      const paused = spoke && now - lastVoice > 800;
+      const tooLong = spoke && now - started > 12_000;
+      if (paused || tooLong) {
+        window.clearInterval(timer);
+        finish(true);
+      }
+    }, 50);
+
+    function finish(send: boolean) {
+      const done = () => {
+        source.disconnect();
+        void context.close();
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        resolve(send && blob.size >= 500 ? blob : null);
+      };
+      if (recorder.state === "inactive") {
+        done();
+        return;
+      }
+      recorder.onstop = done;
+      recorder.stop();
+    }
+  });
 }
 
 function Composer({ onSend }: { onSend: (text: string) => void }) {

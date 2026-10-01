@@ -1,3 +1,4 @@
+import { machineIntro, machineForUtterance, requestedMachine } from "../agent/arrive";
 import type { MachineId } from "../catalog/index";
 import { answerWithRules, type TurnResult } from "../agent/rules";
 import { takeTurn } from "../agent/turn";
@@ -11,11 +12,12 @@ import {
 } from "../order/engine";
 
 export type SessionResponse = {
-  session: OrderSession;
+  session: OrderSession | null;
   readBack: ReadBack | null;
   say: string | null;
   notice: string | null;
   spotlightIds: string[];
+  switchTo: MachineId | null;
 };
 
 type Held = {
@@ -42,6 +44,32 @@ const NOTICES: Record<RejectReason, string> = {
   not_awaiting_confirmation: "Review the order before confirming.",
   stale_cart: "That order changed. Review it again.",
 };
+
+export function sessionMachine(id: string): MachineId | null {
+  return sessions.get(id)?.session.machineId ?? null;
+}
+
+/** First screen. Opens the machine the customer named, or asks them to choose. */
+export async function arriveSession(text: string, now = Date.now()): Promise<SessionResponse> {
+  const machineId = machineForUtterance(text);
+  if (!machineId) {
+    return {
+      session: null,
+      readBack: null,
+      say: "Boost Coffee or Snacks Bot?",
+      notice: null,
+      spotlightIds: [],
+      switchTo: null,
+    };
+  }
+  const opened = openSession(machineId, now);
+  if (!opened.session) return opened;
+  if (requestedMachine(text) === machineId) {
+    const intro = machineIntro(machineId);
+    return { ...opened, say: intro.say, spotlightIds: intro.spotlightIds };
+  }
+  return (await messageSession(opened.session.id, text, now)) ?? opened;
+}
 
 export function openSession(machineId: MachineId, now = Date.now()): SessionResponse {
   const session = createSession({ id: crypto.randomUUID(), machineId, now });
@@ -71,7 +99,7 @@ export async function messageSession(id: string, text: string, now = Date.now())
   return enqueue(id, async (held) => {
     const turn = await takeTurn(held.session, text, now);
     remember(held, turn);
-    return snapshot(held);
+    return snapshot(held, turn.switchTo);
   });
 }
 
@@ -88,13 +116,14 @@ function remember(held: Held, turn: TurnResult) {
   held.readBack = turn.readBack;
 }
 
-function snapshot(held: Held): SessionResponse {
+function snapshot(held: Held, switchTo: MachineId | null = null): SessionResponse {
   return {
     session: held.session,
     readBack: held.readBack,
     say: held.say,
     notice: held.notice,
     spotlightIds: held.spotlightIds,
+    switchTo,
   };
 }
 

@@ -1,3 +1,4 @@
+import { ALIASES } from "./aliases";
 import { COFFEE_ITEMS } from "./coffee";
 import { SNACK_ITEMS } from "./snacks";
 import { MACHINES, type CatalogItem, type MachineId } from "./types";
@@ -51,6 +52,10 @@ for (const item of CATALOG) {
   byId.set(item.id, item);
 }
 
+for (const id of Object.keys(ALIASES)) {
+  if (!byId.has(id)) throw new Error(`Alias for an item that is not on the menu: ${id}`);
+}
+
 export function getItem(id: string): CatalogItem | undefined {
   return byId.get(id);
 }
@@ -61,4 +66,17 @@ export function itemsForMachine(machineId: MachineId): readonly CatalogItem[] {
 
 export function machineName(machineId: MachineId): string {
   return MACHINES[machineId].name;
+}
+
+export function aliasesFor(id: string): readonly string[] {
+  return ALIASES[id] ?? [];
+}
+
+/** Names and customer phrases, for the transcriber. Both machines, every turn. */
+export function speechPrompt(): string {
+  const parts = CATALOG.map((item) => {
+    const extra = aliasesFor(item.id);
+    return extra.length > 0 ? `${item.name} (${extra.join(", ")})` : item.name;
+  });
+  return `What snacks do you have? Snacks Bot. Boost Coffee. ${parts.join("; ")}.`;
 }

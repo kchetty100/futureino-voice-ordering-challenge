@@ -1,4 +1,5 @@
 import {
+  aliasesFor,
   getItem,
   itemsForMachine,
   type CatalogItem,
@@ -43,6 +44,18 @@ export function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 }
 
+/** Both machines. A coffee order can also hold a snack. */
+export function searchCatalog(query: string): CatalogItem[] {
+  const seen = new Set<string>();
+  return [...searchMenu("coffee", query), ...searchMenu("snacks", query)]
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .sort((a, b) => itemScore(b, query) - itemScore(a, query) || a.name.localeCompare(b.name));
+}
+
 export function searchMenu(machineId: MachineId, query: string): CatalogItem[] {
   const tokens = queryTokens(query);
   const ranked = itemsForMachine(machineId)
@@ -64,7 +77,7 @@ export function runTool(
   }
   if (name === "search_menu") {
     const stayed = apply(session, { type: "activity", now });
-    const hits = searchMenu(session.machineId, String(args.query ?? ""));
+    const hits = searchCatalog(String(args.query ?? ""));
     const say =
       hits.length === 0
         ? "This machine doesn't carry that."
@@ -110,26 +123,44 @@ export function runTool(
 }
 
 export function isClearYes(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/[.!]/g, "");
-  return [
-    "yes",
-    "yes please",
-    "yeah",
-    "yep",
-    "yup",
-    "ok",
-    "okay",
-    "confirm",
-    "that's right",
-    "that is right",
-    "correct",
-    "go ahead",
-  ].includes(normalized);
+  const normalized = spokenWords(text);
+  if (YES.has(normalized)) return true;
+  if (changesOrder(normalized)) return false;
+  const content = normalized.split(" ").filter((token) => token && !YES_FILLER.has(token));
+  if (content.length > 0 && content.every((token) => YES_WORD.has(token))) return true;
+  return content.length === 1 && (sameSound(content[0] ?? "", "confirm") || sameSound(content[0] ?? "", "proceed"));
+}
+
+/** A reply that accepts the order and also changes it is not a confirmation. */
+export function changesOrder(text: string): boolean {
+  return /\b(but|except|change|make|add|remove|without|instead|another|also|too|hot|iced|ice|cold|room|no|not)\b/.test(spokenWords(text));
 }
 
 export function isClearNo(text: string): boolean {
-  const normalized = text.trim().toLowerCase().replace(/[.!]/g, "");
-  return ["no", "nope", "nah", "change it", "change"].includes(normalized);
+  const normalized = spokenWords(text);
+  return ["no", "nope", "nah", "change it", "change", "no thanks", "no thank you"].includes(normalized);
+}
+
+/** They do not want another item. "No, make it hot" is a change, not this. */
+export function wantsNoMore(text: string): boolean {
+  const normalized = spokenWords(text);
+  if (NO_MORE.has(normalized)) return true;
+  return /^(no|nope|nah|nothing)( thanks| thank you| more| else)?$/.test(normalized);
+}
+
+/** The reply asks to change the order, not merely to stop adding. */
+export function wantsChange(text: string): boolean {
+  return /\b(change|make|add|remove|but|instead|hot|iced|ice|cold|room|not)\b/.test(spokenWords(text));
+}
+
+function spokenWords(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function asksAllergens(text: string): boolean {
@@ -181,21 +212,62 @@ function sayForReadBack(readBack: ReadBack): string {
       return `${temp}${line.name}${qty}`;
     })
     .join(", ");
-  return `That's ${lines}. Total ${money(readBack.totalCents)}. Say yes or tap Confirm.`;
+  return `That's ${lines}. Total ${money(readBack.totalCents)}. Would you like to add anything else, or say yes to confirm the order?`;
 }
 
 function scoreItem(item: CatalogItem, query: string, tokens: string[]): number {
   const name = item.name.toLowerCase();
+  const words = name.split(/\s+/);
   const phrase = tokens.join(" ");
   let score = 0;
-  if (phrase && name === phrase) score += 10;
+  if (phrase && (name === phrase || sameSound(phrase, name))) score += 10;
   for (const token of tokens) {
-    if (name.split(/\s+/).includes(token)) score += 3;
+    if (words.includes(token) || sameSound(token, name) || words.some((word) => sameSound(token, word))) score += 3;
     else if (name.includes(token)) score += 1;
     if (item.tasteTags.includes(token as TasteTag)) score += 1;
   }
   if (query.trim().toLowerCase() === name) score += 2;
+  return Math.max(score, itemScore(item, query));
+}
+
+/** Name, customer phrase, or a taste word. A taste word stays below a precise name. */
+export function itemScore(item: CatalogItem, query: string): number {
+  const phrases = [item.name, ...aliasesFor(item.id)];
+  const named = Math.max(...phrases.map((phrase) => nameScore(phrase, query)));
+  const tokens = queryTokens(query);
+  const taste =
+    tokens.length > 0 && tokens.every((token) => item.tasteTags.includes(token as TasteTag)) ? 4 : 0;
+  return Math.max(named, taste);
+}
+
+/** How well a product name matches the words the customer actually used. */
+export function nameScore(name: string, query: string): number {
+  const tokens = queryTokens(query);
+  const normalized = name.toLowerCase();
+  const words = normalized.split(/\s+/);
+  let score = 0;
+  if (tokens.length > 0 && (tokens.join(" ") === normalized || tokens.includes(normalized) || tokens.some((token) => sameSound(token, normalized)))) {
+    score += 10;
+  }
+  for (const token of tokens) {
+    if (words.includes(token) || words.some((word) => sameSound(token, word))) score += 3;
+  }
   return score;
+}
+
+/** Shared consonants, so a clipped "maricano" still lines up with "americano". */
+function sameSound(heard: string, name: string): boolean {
+  const heardSound = consonants(heard);
+  const nameSound = consonants(name);
+  return heardSound.length >= 4 && heardSound === nameSound;
+}
+
+function consonants(word: string): string {
+  return word
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+    .replace(/[aeiou]/g, "")
+    .replace(/(.)\1+/g, "$1");
 }
 
 function queryTokens(query: string): string[] {
@@ -240,3 +312,107 @@ const STOP = new Set([
 ]);
 
 const TEMP_WORDS = new Set(["hot", "iced", "ice", "cold", "room"]);
+
+const YES = new Set([
+  "yes",
+  "yes please",
+  "yeah",
+  "yep",
+  "yup",
+  "ok",
+  "okay",
+  "confirm",
+  "confirmed",
+  "please confirm",
+  "proceed",
+  "proceed please",
+  "go ahead",
+  "go for it",
+  "do it",
+  "send it",
+  "sounds good",
+  "sounds great",
+  "that works",
+  "thats fine",
+  "that is fine",
+  "thats right",
+  "that is right",
+  "thats correct",
+  "that is correct",
+  "correct",
+  "perfect",
+  "absolutely",
+  "for sure",
+  "sure",
+  "sure thing",
+  "why not",
+  "alright",
+  "fine by me",
+  "works for me",
+  "deal",
+  "sold",
+  "im in",
+  "that will do",
+  "lets do it",
+  "lets go",
+  "good to go",
+  "place the order",
+  "place my order",
+  "ill take it",
+  "i will take it",
+  "im ready",
+  "i am ready",
+  "ring it up",
+  "uh huh",
+  "mm hmm",
+  "mhm",
+]);
+
+const YES_WORD = new Set(["yes", "yeah", "yep", "yup", "ok", "okay", "confirm", "confirmed", "proceed", "correct", "sure", "perfect", "absolutely", "huh", "mhm", "hmm", "mm"]);
+
+const NO_MORE = new Set([
+  "no",
+  "nope",
+  "nah",
+  "no thanks",
+  "no thank you",
+  "nothing",
+  "nothing else",
+  "no more",
+  "thats it",
+  "thats all",
+  "that is all",
+  "that is it",
+  "im good",
+  "im done",
+  "all good",
+  "all set",
+  "just that",
+  "only that",
+  "thats everything",
+  "im all set",
+  "no i dont",
+  "i dont",
+  "i dont want anything else",
+  "i dont want anything",
+]);
+
+const YES_FILLER = new Set([
+  "please",
+  "thanks",
+  "thank",
+  "you",
+  "that",
+  "thats",
+  "is",
+  "right",
+  "i",
+  "do",
+  "it",
+  "sounds",
+  "good",
+  "go",
+  "ahead",
+  "uh",
+  "um",
+]);

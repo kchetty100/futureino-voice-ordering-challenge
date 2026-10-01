@@ -187,9 +187,6 @@ function applyAdd(
   if (!item) {
     return fail(touch(session, command.now), "unknown_product");
   }
-  if (item.machineId !== session.machineId) {
-    return fail(touch(session, command.now), "wrong_machine");
-  }
 
   const quantity = command.quantity ?? 1;
   if (!isQuantity(quantity)) {

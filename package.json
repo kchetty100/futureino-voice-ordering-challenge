@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "next dev",
-    "test": "tsx --test src/order/engine.test.ts src/agent/turn.test.ts",
+    "test": "tsx --test src/order/engine.test.ts src/agent/turn.test.ts src/agent/phrases.test.ts src/speech/line.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

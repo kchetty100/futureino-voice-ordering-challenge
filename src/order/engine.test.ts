@@ -85,17 +85,20 @@ describe("order engine", () => {
     assert.equal(read.reason, "incomplete");
   });
 
-  it("rejects an item from the other machine and an item that does not exist", () => {
-    const start = coffee();
-    const other = apply(start, { type: "add", productId: CHIPS, now: 1 });
-    assert.equal(other.ok, false);
-    assert.equal(other.reason, "wrong_machine");
-    assert.equal(other.session.phase, "browsing");
-    assert.equal(other.session.lines.length, 0);
-    assert.equal(other.session.cartVersion, 0);
-    assert.equal(other.session.lastActivityAt, 1);
+  it("keeps a coffee and a snack on the same cart", () => {
+    const drink = apply(coffee(), { type: "add", productId: LATTE, temperature: "iced", now: 1 });
+    const both = apply(drink.session, { type: "add", productId: CHIPS, now: 2 });
+    assert.equal(both.ok, true);
+    assert.equal(both.session.lines.length, 2);
+    assert.equal(both.session.lines[1]?.productId, CHIPS);
+    assert.equal(both.session.lines[1]?.temperature, undefined);
 
-    const missing = apply(start, { type: "add", productId: "burger", now: 2 });
+    const read = apply(both.session, { type: "read_back", now: 3 });
+    assert.equal(read.ok, true);
+    assert.equal(read.readBack?.lines.length, 2);
+    assert.equal(read.readBack?.totalCents, 360 + 200);
+
+    const missing = apply(coffee(), { type: "add", productId: "burger", now: 4 });
     assert.equal(missing.ok, false);
     assert.equal(missing.reason, "unknown_product");
     assert.equal(missing.session.lines.length, 0);

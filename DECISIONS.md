@@ -47,7 +47,7 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 
 ## 2026-10-01 — Catalog, temperature, and allergens
 
-**Decided:** We author the catalog from the photos: a name, a price, and taste tags per item. Every item stores allergens as unknown, and the agent says it does not know. Each coffee line requires a temperature of hot, iced, or room. A session is bound to one machine. The other machine's products are not searchable.
+**Decided:** We author the catalog from the photos: a name, a price, and taste tags per item. Every item stores allergens as unknown, and the agent says it does not know. Each coffee line requires a temperature of hot, iced, or room. A snack does not. One order can hold both.
 
 **Alternatives:**
 
@@ -176,7 +176,7 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 
 ## 2026-10-01 — Text agent and server session
 
-**Decided:** The cart lives in an in-memory server session. Tap and type both call it, so they share one order. `POST /api/sessions` opens a machine. `POST /api/sessions/:id` sends a touch command. `POST /api/sessions/:id/message` sends typed text. The agent may search the menu and draft a line. It has no confirm tool. A clear yes or no is handled in code before any model runs, and only a clear yes calls `confirm` with the cart version on screen. The words on screen are built from the engine result. If `OPENAI_API_KEY` is missing, or the model call fails, the same rules answer. The key stays in server env.
+**Decided:** The cart lives in an in-memory server session. Tap and type both call it, so they share one order. `POST /api/sessions` opens a machine. `POST /api/sessions/:id` sends a touch command. `POST /api/sessions/:id/message` sends typed text. The agent may search the menu and draft a line. It has no confirm tool. A clear yes or no is handled in code before any model runs, and only that decision calls `confirm` with the cart version on screen. "Yes?", "Yes,", "yes please", "confirm", "proceed", and a misspelling such as "confrirm" are still a yes. When the cart is complete, the read-back asks whether to add anything else or say yes to confirm. "No", "nothing else", "that's it", and "I'm good" confirm. "Something else" keeps the cart and asks what they want. A reply that is not an item does not get "this machine doesn't carry that." When the order is waiting for that yes and the wording is not in the list, `gpt-4o-mini` classifies the reply as confirm, decline, or other. Only confirm calls the engine. A yes that also changes the order is not a confirm. The model still has no confirm tool. The words on screen are built from the engine result. If `OPENAI_API_KEY` is missing, or the model call fails, the same rules answer. The key stays in server env.
 
 **Alternatives:**
 
@@ -189,3 +189,41 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 **Revisit:** The in-memory map does not survive a restart or a second server instance. Move it when we deploy. English reply templates stay until voice needs other languages. The model, if a key is present, is `gpt-4o-mini` and only through the same tools.
 
 **How we checked:** `npm test` covers the typed cases with the rules agent. The kiosk posts to the session API.
+
+## 2026-10-01 — Tap-to-talk
+
+**Decided:** Tap Talk once to start a conversation. The microphone stays open for that conversation: it sends a turn when the customer pauses, the machine speaks the on-screen line, then it listens again. Tap the button again to end the conversation and close the microphone. The clip is transcribed on the server in English with the same `OPENAI_API_KEY`, and the transcriber is given this machine's item names. A drink and its temperature in one sentence are one draft. A heard name that shares the consonants of exactly one item still counts as that item, so a clipped "maricano" is the Americano. Then it takes the same turn as typed text. If the rules already changed the cart, that result wins over a model draft that adds extra items. Playback is text-to-speech of the line already on screen, and only that line. The microphone does not record while the machine is speaking. The models are `gpt-4o-mini-transcribe` and `gpt-4o-mini-tts`. A sentence joined by and, plus, or a comma adds each clear item. A product whose name contains and, such as Cookies and Cream Bar, stays one item.
+
+**Alternatives:**
+
+- A speech-to-speech session that talks on its own.
+- Hold the button for every sentence.
+- Speak a second script that is not the on-screen line.
+
+**Why:** Holding the button for every temperature and every yes made the order feel like a walkie-talkie. A conversation still starts and ends with a tap, so the microphone is not open while the machine is idle. A spoken yes still has to hit the same confirm rule as a typed yes. If the voice said something the screen did not, the review would fail the "screen and voice agree" check.
+
+**Revisit:** Another language once the replies themselves are translated. A shorter spoken line if the read-back is too long in a noisy room. The pause length if a quiet customer gets cut off, or a noisy room never pauses.
+
+## 2026-10-01 — Opening screen and the other machine
+
+**Decided:** Talk is on the opening screen, before a machine is chosen. "Coffee", "snacks", or a product name opens that machine and starts the order. Asking what the other machine has, or saying "I would like to add a snack" during a coffee order, shows the snack menu. The coffee stays in the cart. A named snack is added beside it. The read-back includes both. When the coffee or snack page is showing because they asked for that menu, the reply is "Please view the items below." It does not name sample items. On the cart, "remove the latte", "add one more", "one less", and "make it hot" change that line and read the order back. The cart page stays up.
+
+**Alternatives:**
+
+- Keep Talk only after a machine is tapped.
+- Open Snacks Bot as a new order and leave the coffee behind.
+- Answer "this machine doesn't carry that" and stay on the coffee page.
+
+**Why:** The first choice is which menu they see, and they can say it. A follow-up about snacks is another item on the same order, not a second cart. A drink still needs hot, iced, or room. A snack does not.
+
+## 2026-10-01 — Customer phrases
+
+**Decided:** Each item can carry phrases a customer actually says, such as "yellow bag" for Potato Chips and "black coffee" for both Americano and Daily Black. A phrase that fits one item is added. A phrase that fits two is asked back, with those items highlighted. Taste words such as "crunchy" list matching items and do not pick one. When the rules do not already recognize the sentence, `gpt-4o-mini` returns menu ids in a fixed JSON shape. Code drops any id that is not on the menu. That call cannot confirm. The transcriber is primed with every name and phrase from both machines on every turn.
+
+**Alternatives:**
+
+- Leave matching on the printed menu title only.
+- Let the model add whatever product it names in free text.
+- A speech-to-speech session that chooses the item itself.
+
+**Why:** People do not order by the title on the photo. A shared phrase has to stay a question, or "black coffee" would silently become one of two drinks. The engine still writes the cart, and a yes still goes through the confirm check.

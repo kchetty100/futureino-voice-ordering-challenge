@@ -1,0 +1,34 @@
+/**
+ * Words a customer says that are not the menu title.
+ * These are labels for the photo, not ingredients or allergens.
+ */
+export const ALIASES: Record<string, readonly string[]> = {
+  "coffee-01": ["black coffee", "long black"],
+  "coffee-02": ["cappuccino", "cocoa"],
+  "coffee-03": ["vanilla"],
+  "coffee-04": ["milk coffee", "cafe latte"],
+  "coffee-05": ["black coffee", "drip coffee", "regular coffee"],
+  "coffee-06": ["chocolate coffee"],
+  "coffee-07": ["chai", "chai latte"],
+  "coffee-08": ["caramel"],
+  "coffee-09": ["green tea"],
+  "coffee-10": ["berry", "berries"],
+  "coffee-11": ["mango"],
+  "coffee-12": ["orange drink"],
+  "coffee-13": ["lemon"],
+  "coffee-14": ["whipped mocha"],
+  "coffee-15": ["lidded cup"],
+  "coffee-16": ["tea"],
+  "coffee-17": ["espresso shot"],
+  "coffee-18": ["green latte"],
+  "snacks-01": ["almonds", "cinnamon nuts"],
+  "snacks-05": ["peanuts"],
+  "snacks-07": ["onion chips"],
+  "snacks-08": ["gummy bears", "gummies"],
+  "snacks-10": ["tortilla chips", "nachos"],
+  "snacks-17": ["jerky"],
+  "snacks-19": ["yellow bag", "plain chips", "ridged chips"],
+  "snacks-22": ["pretzel"],
+  "snacks-26": ["cheese curls", "cheese puffs"],
+  "snacks-30": ["popped corn"],
+};
