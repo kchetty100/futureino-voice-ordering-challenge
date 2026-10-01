@@ -159,3 +159,17 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 **Revisit:** The 20s and 45s timings after a test in a noisy room. The quantity cap if a real machine allows larger orders.
 
 **How we checked:** `npm test` runs these cases against the catalog. No model is involved.
+
+## 2026-10-01 — Touch kiosk
+
+**Decided:** A Next.js screen calls the order engine for every tap. The session stays in the browser until a text agent needs one shared server session. On a laptop the screen sits in a portrait bezel. On a phone it fills the display. The path is attract, machine choice, product grid, a sheet for temperature and the unknown-allergen line, cart, read-back, then ready-to-pay. The engine gained three commands for that screen: `activity` for "I'm here", `revise` for "Change order", and `cancel` for "Start over". Product photos stay in `images/` and are served from there. Names were not renamed.
+
+**Alternatives:**
+
+- Keep a second cart in React state and copy it into the engine at confirm.
+- Put the session on the server before there is a second client.
+- Build voice in the same step.
+
+**Why:** The touch path is how we show the engine is the only writer of the cart. A second cart would drift from those rules. A server roundtrip can wait until voice and touch have to share one order. Voice still needs a speech key.
+
+**Revisit:** Move this same session onto the server when the text agent is added. Adjust the bezel if a real machine resolution is specified.

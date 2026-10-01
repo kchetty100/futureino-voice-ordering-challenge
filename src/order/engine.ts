@@ -80,16 +80,20 @@ export type RejectReason =
   | "not_awaiting_confirmation"
   | "stale_cart";
 
-export type OrderCommand = { now: number } & (
+export type OrderInput =
   | { type: "add"; productId: string; quantity?: number; temperature?: Temperature }
   | { type: "set_temperature"; lineId: string; temperature: Temperature }
   | { type: "set_quantity"; lineId: string; quantity: number }
   | { type: "remove_line"; lineId: string }
   | { type: "read_back" }
   | { type: "confirm"; cartVersion: number; source: ConfirmSource }
+  | { type: "revise" }
+  | { type: "activity" }
+  | { type: "cancel" }
   | { type: "silence" }
-  | { type: "tick" }
-);
+  | { type: "tick" };
+
+export type OrderCommand = OrderInput & { now: number };
 
 export type ApplyResult = {
   session: OrderSession;
@@ -149,6 +153,12 @@ export function apply(session: OrderSession, command: OrderCommand): ApplyResult
       return applyReadBack(session, command.now);
     case "confirm":
       return applyConfirm(session, command);
+    case "revise":
+      return applyRevise(session, command.now);
+    case "activity":
+      return ok(touch(session, command.now));
+    case "cancel":
+      return ok(abandon(touch(session, command.now)));
     default: {
       const unreachable: never = command;
       return unreachable;
@@ -306,6 +316,18 @@ function applyReadBack(session: OrderSession, now: number): ApplyResult {
     confirmedBy: null,
   };
   return { ...ok(next), readBack: buildReadBack(next) };
+}
+
+function applyRevise(session: OrderSession, now: number): ApplyResult {
+  if (session.phase !== "awaiting_confirmation" && session.phase !== "ready_to_pay") {
+    return fail(touch(session, now), "not_awaiting_confirmation");
+  }
+  return ok({
+    ...touch(session, now),
+    phase: session.lines.length === 0 ? "browsing" : "drafting",
+    readBackVersion: null,
+    confirmedBy: null,
+  });
 }
 
 function applyConfirm(

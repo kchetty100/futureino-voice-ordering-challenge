@@ -296,4 +296,44 @@ describe("order engine", () => {
     const hot = same.session.lines.find((line) => line.temperature === "hot");
     assert.equal(hot?.quantity, 3);
   });
+
+  it("lets the customer stay, step back from review, or cancel", () => {
+    const added = apply(coffee(), {
+      type: "add",
+      productId: LATTE,
+      temperature: "hot",
+      now: 0,
+    });
+    const prompt = apply(added.session, { type: "tick", now: IDLE_PROMPT_MS });
+    const stay = apply(prompt.session, { type: "activity", now: IDLE_PROMPT_MS + 1 });
+    assert.equal(stay.ok, true);
+    assert.equal(stay.session.idlePrompted, false);
+    assert.equal(stay.session.cartVersion, added.session.cartVersion);
+    assert.equal(stay.session.lines.length, 1);
+
+    const read = apply(stay.session, { type: "read_back", now: 100 });
+    const back = apply(read.session, { type: "revise", now: 101 });
+    assert.equal(back.session.phase, "drafting");
+    assert.equal(back.session.cartVersion, read.session.cartVersion);
+    assert.equal(back.session.readBackVersion, null);
+
+    const yes = apply(back.session, {
+      type: "confirm",
+      cartVersion: back.session.cartVersion,
+      source: "confirm_tap",
+      now: 102,
+    });
+    assert.equal(yes.reason, "not_awaiting_confirmation");
+
+    const cancelled = apply(back.session, { type: "cancel", now: 103 });
+    assert.equal(cancelled.session.phase, "abandoned");
+    assert.equal(cancelled.session.lines.length, 0);
+    const late = apply(cancelled.session, {
+      type: "confirm",
+      cartVersion: read.session.cartVersion,
+      source: "confirm_tap",
+      now: 104,
+    });
+    assert.equal(late.reason, "session_abandoned");
+  });
 });
