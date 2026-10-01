@@ -1,4 +1,5 @@
 import { speechPrompt } from "../../../catalog/index";
+import { beginLobby, noteUsageFor, recordTurn } from "../../../operator/log";
 import { arriveSession } from "../../../session/store";
 import { lineToSpeak } from "../../../speech/line";
 import { synthesize, transcribe } from "../../../speech/openai";
@@ -9,6 +10,8 @@ const PROMPT = speechPrompt();
 export async function POST(request: Request) {
   const contentType = request.headers.get("content-type") ?? "";
   let text = "";
+  let usage: Awaited<ReturnType<typeof transcribe>>["usage"] | null = null;
+  let spoken = contentType.includes("application/json") ? ("text" as const) : ("voice" as const);
   if (contentType.includes("application/json")) {
     const body = (await request.json()) as { text?: string };
     text = body.text?.trim() ?? "";
@@ -19,8 +22,9 @@ export async function POST(request: Request) {
     if (!(audio instanceof File) || audio.size === 0) return Response.json({ error: "No audio." }, { status: 400 });
     if (audio.size > MAX_AUDIO_BYTES) return Response.json({ error: "That recording is too long." }, { status: 413 });
     try {
-      text = await transcribe(audio, PROMPT);
-      if (text === PROMPT) text = "";
+      const heard = await transcribe(audio, PROMPT, clipSeconds(form));
+      text = heard.text === PROMPT ? "" : heard.text;
+      usage = heard.usage;
     } catch (error) {
       console.error("Transcription failed.", error instanceof Error ? error.message : "unknown error");
       return Response.json({ error: "Speech didn't come through." }, { status: 502 });
@@ -28,6 +32,10 @@ export async function POST(request: Request) {
   }
 
   if (!text) {
+    const now = Date.now();
+    const logId = beginLobby(now);
+    recordTurn(logId, { at: now, source: spoken, customer: null, say: "I didn't catch that." });
+    if (usage) noteUsageFor(logId, usage);
     return Response.json({
       session: null,
       readBack: null,
@@ -40,16 +48,25 @@ export async function POST(request: Request) {
     });
   }
 
-  const response = await arriveSession(text);
+  const arrived = await arriveSession(text, Date.now(), spoken);
+  if (usage) noteUsageFor(arrived.logId, usage);
   let audioBase64: string | null = null;
-  const line = lineToSpeak(response.say);
+  const line = lineToSpeak(arrived.say);
   if (line && process.env.OPENAI_API_KEY) {
     try {
-      const bytes = await synthesize(line);
-      audioBase64 = bytes ? Buffer.from(bytes).toString("base64") : null;
+      const playback = await synthesize(line);
+      if (playback) noteUsageFor(arrived.logId, playback.usage);
+      audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
     } catch (error) {
       console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
     }
   }
+  const { logId: _logId, ...response } = arrived;
   return Response.json({ ...response, transcript: text, audioBase64 });
+}
+
+function clipSeconds(form: FormData): number {
+  const raw = Number(form.get("seconds"));
+  if (!Number.isFinite(raw) || raw < 0) return 0;
+  return Math.min(raw, 30);
 }

@@ -1,3 +1,6 @@
+import { chatUsage } from "../operator/cost";
+import { noteUsage } from "../operator/log";
+
 export type ConfirmationIntent = "confirm" | "decline" | "other";
 
 const PROMPT = [
@@ -44,7 +47,11 @@ export async function classifyConfirmation(text: string): Promise<ConfirmationIn
     }),
   });
   if (!response.ok) throw new Error(`Confirmation check failed (${response.status}).`);
-  const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string | null } }> };
+  const payload = (await response.json()) as {
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+  noteUsage(chatUsage("gpt-4o-mini", payload));
   const raw = payload.choices?.[0]?.message?.content ?? "";
   try {
     const parsed = JSON.parse(raw) as { intent?: string };

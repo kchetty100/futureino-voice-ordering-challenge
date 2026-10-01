@@ -220,11 +220,12 @@ export function Kiosk() {
     void post(`/api/sessions/${session.id}/message`, { text });
   }
 
-  function sendClip(blob: Blob) {
+  function sendClip(clip: { blob: Blob; seconds: number }) {
     setPicker(null);
     const body = new FormData();
-    const ext = blob.type.includes("mp4") ? "mp4" : blob.type.includes("ogg") ? "ogg" : "webm";
-    body.append("audio", blob, `talk.${ext}`);
+    const ext = clip.blob.type.includes("mp4") ? "mp4" : clip.blob.type.includes("ogg") ? "ogg" : "webm";
+    body.append("audio", clip.blob, `talk.${ext}`);
+    body.append("seconds", String(clip.seconds));
     if (!session) return post("/api/arrive", body);
     return post(`/api/sessions/${session.id}/speech`, body);
   }
@@ -800,7 +801,7 @@ type TalkPhase = "off" | "listening" | "thinking";
 
 function useConversation(opts: {
   enabled: boolean;
-  onClip: (blob: Blob) => Promise<unknown>;
+  onClip: (clip: { blob: Blob; seconds: number }) => Promise<unknown>;
   onArm: () => void;
   onStop: () => void;
   onMiss: (text: string) => void;
@@ -902,7 +903,7 @@ function wait(ms: number) {
 }
 
 /** Record until the customer pauses. Returns null when the pause had no speech. */
-function captureUtterance(stream: MediaStream, live: () => boolean): Promise<Blob | null> {
+function captureUtterance(stream: MediaStream, live: () => boolean): Promise<{ blob: Blob; seconds: number } | null> {
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   const chunks: Blob[] = [];
@@ -953,7 +954,8 @@ function captureUtterance(stream: MediaStream, live: () => boolean): Promise<Blo
         source.disconnect();
         void context.close();
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-        resolve(send && blob.size >= 500 ? blob : null);
+        const seconds = (Date.now() - started) / 1000;
+        resolve(send && blob.size >= 500 ? { blob, seconds } : null);
       };
       if (recorder.state === "inactive") {
         done();

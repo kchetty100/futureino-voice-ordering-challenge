@@ -227,3 +227,19 @@ The catalog and the order engine live in `src/`. The coffee and snack photos are
 - A speech-to-speech session that chooses the item itself.
 
 **Why:** People do not order by the title on the photo. A shared phrase has to stay a question, or "black coffee" would silently become one of two drinks. The engine still writes the cart, and a yes still goes through the confirm check.
+
+## 2026-10-02 — Operator view
+
+**Decided:** `/operator` lists each session still held in memory: the transcript, every cart version, and a cost estimate. Typed lines, voice lines, and taps are separate. A tick that does not change the cart is not a turn. Walking away is one system line and a new empty cart version. The page asks for `OPERATOR_PASSWORD` and sets an httpOnly cookie. It is marked noindex. The password stays in server env.
+
+Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` use the usage object on the response. A transcribe response with no token counts falls back to $0.003 per minute of the recorded clip. `gpt-4o-mini-tts` does not return usage, so playback is estimated at about $0.015 per minute of speech plus the text input. The page and the API share that memory on the process. The log does not survive a restart or a second server.
+
+**Alternatives:**
+
+- A public orders page with the API key still hidden.
+- Saving every session to a database before the host is chosen.
+- Guessing the speech bill only from audio seconds and ignoring token counts.
+
+**Why:** The review needs to see what was said, what the cart became, and what it cost. A database can wait until deploy, because the process that served the customer is the one the operator is looking at. The password is the gate that exists before a host is chosen.
+
+**Revisit:** Move the same log when the process is no longer one laptop. Rate limits and the host lock are the deploy step. Replace the speech estimate if the speech API starts returning a usage object.

@@ -1,4 +1,6 @@
 import { aliasesFor, CATALOG, getItem, type MachineId, type Temperature } from "../catalog/index";
+import { chatUsage } from "../operator/cost";
+import { noteUsage } from "../operator/log";
 import { apply, type OrderSession } from "../order/engine";
 import { machineIntro } from "./arrive";
 import { finishIfComplete, type TurnResult } from "./rules";
@@ -165,7 +167,11 @@ export async function understandUtterance(session: OrderSession, text: string): 
     }),
   });
   if (!response.ok) throw new Error(`Menu mapping failed (${response.status}).`);
-  const payload = (await response.json()) as { choices?: Array<{ message?: { content?: string | null } }> };
+  const payload = (await response.json()) as {
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    choices?: Array<{ message?: { content?: string | null } }>;
+  };
+  noteUsage(chatUsage("gpt-4o-mini", payload));
   const raw = payload.choices?.[0]?.message?.content ?? "";
   try {
     return parseHeard(JSON.parse(raw) as unknown);
