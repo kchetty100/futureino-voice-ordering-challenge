@@ -36,8 +36,8 @@ export default async function OperatorPage({ searchParams }: { searchParams: Pro
   );
 }
 
-function OrderList() {
-  const sessions = listOperatorSessions();
+async function OrderList() {
+  const sessions = await listOperatorSessions();
   if (sessions.length === 0) {
     return (
       <section className={styles.panel}>

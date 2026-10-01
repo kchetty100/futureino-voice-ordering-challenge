@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { getItem, type MachineId } from "../catalog/index";
+import { sharedGet, sharedIds, sharedMget, sharedRemember, sharedSet, sharedStoreConfigured } from "../persist/remote";
 import type { OrderSession, Phase } from "../order/engine";
 import { estimateUsd, type ModelUsage } from "./cost";
 
@@ -129,15 +130,66 @@ export function noteUsage(usage: ModelUsage | null | undefined) {
   noteUsageFor(id, usage);
 }
 
-export function listOperatorSessions(): OperatorView[] {
-  return [...records.values()]
-    .sort((left, right) => right.updatedAt - left.updatedAt)
-    .map(publish);
+export function forgetLocalRecords() {
+  records.clear();
 }
 
-export function operatorSession(id: string): OperatorView | null {
+/** Pull one order into this process before a route adds a line the turn did not save. */
+export async function loadRecord(id: string): Promise<void> {
+  if (!sharedStoreConfigured()) return;
+  const raw = await sharedGet(recordKey(id));
+  if (!raw) return;
+  try {
+    records.set(id, JSON.parse(raw) as Record);
+  } catch {
+    // Leave the process copy. A later save replaces the corrupt value.
+  }
+}
+
+export async function saveRecord(id: string): Promise<void> {
+  if (!sharedStoreConfigured()) return;
+  const record = records.get(id);
+  if (!record) return;
+  await sharedSet(recordKey(id), JSON.stringify(record));
+  await sharedRemember(id);
+}
+
+export async function listOperatorSessions(): Promise<OperatorView[]> {
+  const found = sharedStoreConfigured() ? await pullRecords() : [...records.values()];
+  return found.sort((left, right) => right.updatedAt - left.updatedAt).map(publish);
+}
+
+export async function operatorSession(id: string): Promise<OperatorView | null> {
+  if (sharedStoreConfigured()) {
+    const raw = await sharedGet(recordKey(id));
+    if (!raw) return null;
+    try {
+      return publish(JSON.parse(raw) as Record);
+    } catch {
+      return null;
+    }
+  }
   const record = records.get(id);
   return record ? publish(record) : null;
+}
+
+async function pullRecords(): Promise<Record[]> {
+  const ids = await sharedIds();
+  const raws = await sharedMget(ids.map(recordKey));
+  const found: Record[] = [];
+  for (const raw of raws) {
+    if (!raw) continue;
+    try {
+      found.push(JSON.parse(raw) as Record);
+    } catch {
+      // Skip a record this process cannot read.
+    }
+  }
+  return found;
+}
+
+function recordKey(id: string): string {
+  return `futureino:record:${id}`;
 }
 
 function publish(record: Record): OperatorView {

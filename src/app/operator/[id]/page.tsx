@@ -18,7 +18,7 @@ export const metadata: Metadata = {
 export default async function OperatorOrderPage({ params }: { params: Promise<{ id: string }> }) {
   if (!operatorConfigured() || !(await operatorAllowed())) return <Gate>{null}</Gate>;
   const { id } = await params;
-  const session = operatorSession(id);
+  const session = await operatorSession(id);
   if (!session) notFound();
   return (
     <Gate>

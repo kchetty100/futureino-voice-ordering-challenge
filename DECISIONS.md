@@ -243,3 +243,39 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** The review needs to see what was said, what the cart became, and what it cost. A database can wait until deploy, because the process that served the customer is the one the operator is looking at. The password is the gate that exists before a host is chosen.
 
 **Revisit:** Move the same log when the process is no longer one laptop. Rate limits and the host lock are the deploy step. Replace the speech estimate if the speech API starts returning a usage object.
+
+## 2026-10-02 — Vercel
+
+**Decided:** The app is deployed from `main` on Vercel, project `futureino-voice-ordering-challenge`, team keegan's projects (Hobby). The URL is https://futureino-voice-ordering-challenge.vercel.app. `OPENAI_API_KEY` and `OPERATOR_PASSWORD` are set on Production and Preview as sensitive server variables. The kiosk is public. `/operator` still asks for the operator password. There is no host-wide password and no rate limit yet.
+
+**Alternatives:**
+
+- Keep it on the laptop only.
+- Put the whole deployment behind Vercel's password, which needs a paid plan.
+
+**Why:** The submission needs a URL that opens on a laptop and a phone. Vercel already builds this Next.js app. The speech key stays on the server.
+
+**Revisit:** A host password or rate limit if the public kiosk can run up the speech bill. The cart and operator log still live in one process, so a second Vercel instance can miss an order. A voice turn can also exceed the function time limit.
+
+## 2026-10-02 — Shared cart on Vercel
+
+**Decided:** The cart and the operator log are written to Upstash Redis when `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are set. The Vercel marketplace names `KV_REST_API_URL` and `KV_REST_API_TOKEN` count as the same store. Each turn reads that store first and writes it back at the end, so a different instance can continue the order and `/operator` can list it. Records last 7 days. With those variables unset, the laptop keeps the cart in process memory.
+
+**Alternatives:**
+
+- Leave the maps in memory and accept that `/operator` can miss a live order.
+- Send the cart back to the browser and trust the browser to return it unchanged.
+
+**Why:** The live kiosk finished an order, then `/operator` on another instance said there were no orders. The engine stays the only writer. The browser still only sends the session id.
+
+**Revisit:** A host password or rate limit if the public kiosk can run up the speech bill.
+
+## 2026-10-02 — Kiosk UI: voice-first layout
+
+**Decided:** Menu dock is compact: Talk stays visible but shorter; cart collapses to a one-line summary that expands for edits; typing is behind "Type instead"; Review stays pinned. Attract leads with Talk and the line "Say coffee, snacks, or tap"; tap-to-browse remains secondary. Talk has distinct listening / thinking / speaking chrome; product and cart taps disable while thinking; network failures use a clearer banner. Spotlighted cards get cyan fill + glow, and the first spotlight scrolls into view.
+
+**Alternatives:** Keep the full cart always open; hide Talk on Attract behind a second step; rely on border-only spotlight.
+
+**Why:** The product grid and Review CTA were losing space to Talk + composer + cart lines. Voice is the intended path; typing is overflow. Turn state and spotlight need to read at arm's length.
+
+**Revisit:** Cart expand max-height if long orders feel cramped. Whether thinking should also block Talk end (currently Talk can still end).

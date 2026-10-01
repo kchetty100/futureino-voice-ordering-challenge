@@ -1,6 +1,7 @@
 import { machineIntro, machineForUtterance, requestedMachine } from "../agent/arrive";
 import { getItem, type MachineId } from "../catalog/index";
-import { beginLobby, beginRecord, duringSession, recordState, recordTurn } from "../operator/log";
+import { beginLobby, beginRecord, duringSession, loadRecord, recordState, recordTurn, saveRecord } from "../operator/log";
+import { sharedGet, sharedSet, sharedStoreConfigured } from "../persist/remote";
 import { answerWithRules, type TurnResult } from "../agent/rules";
 import { takeTurn } from "../agent/turn";
 import {
@@ -54,8 +55,13 @@ const NOTICES: Record<RejectReason, string> = {
   stale_cart: "That order changed. Review it again.",
 };
 
-export function sessionMachine(id: string): MachineId | null {
-  return sessions.get(id)?.session.machineId ?? null;
+export async function sessionMachine(id: string): Promise<MachineId | null> {
+  const held = await recallSession(id);
+  return held?.session.machineId ?? null;
+}
+
+export function forgetLocalSessions() {
+  sessions.clear();
 }
 
 /** First screen. Opens the machine the customer named, or asks them to choose. */
@@ -69,6 +75,7 @@ export async function arriveSession(
     const logId = beginLobby(now);
     const say = "Boost Coffee or Snacks Bot?";
     recordTurn(logId, { at: now, source, customer: text, say });
+    await saveRecord(logId);
     return {
       session: null,
       readBack: null,
@@ -79,23 +86,29 @@ export async function arriveSession(
       logId,
     };
   }
-  const opened = openSession(machineId, now);
+  const opened = await openSession(machineId, now);
   const logId = opened.session?.id ?? beginLobby(now);
-  if (!opened.session) return { ...opened, logId };
+  if (!opened.session) {
+    await saveRecord(logId);
+    return { ...opened, logId };
+  }
   if (requestedMachine(text) === machineId) {
     const intro = machineIntro(machineId);
     recordTurn(logId, { at: now, source, customer: text, say: intro.say });
+    await saveRecord(logId);
     return { ...opened, say: intro.say, spotlightIds: intro.spotlightIds, logId };
   }
   const continued = await messageSession(opened.session.id, text, now, source);
   return { ...(continued ?? opened), logId };
 }
 
-export function openSession(machineId: MachineId, now = Date.now()): SessionResponse {
+export async function openSession(machineId: MachineId, now = Date.now()): Promise<SessionResponse> {
   const session = createSession({ id: crypto.randomUUID(), machineId, now });
   const held: Held = { session, readBack: null, say: null, notice: null, spotlightIds: [] };
   sessions.set(session.id, held);
   beginRecord(session, now);
+  await rememberSession(session.id);
+  await saveRecord(session.id);
   return snapshot(held);
 }
 
@@ -211,9 +224,13 @@ function touchLine(session: OrderSession, command: OrderInput): string | null {
 function enqueue<T>(id: string, fn: (held: Held) => T | Promise<T>): Promise<T | null> {
   const previous = tails.get(id) ?? Promise.resolve();
   const run = previous.then(async () => {
-    const held = sessions.get(id);
+    const held = await recallSession(id);
     if (!held) return null;
-    return fn(held);
+    await loadRecord(id);
+    const result = await fn(held);
+    await rememberSession(id);
+    await saveRecord(id);
+    return result;
   });
   tails.set(
     id,
@@ -223,4 +240,28 @@ function enqueue<T>(id: string, fn: (held: Held) => T | Promise<T>): Promise<T |
     ),
   );
   return run;
+}
+
+async function recallSession(id: string): Promise<Held | null> {
+  if (!sharedStoreConfigured()) return sessions.get(id) ?? null;
+  const raw = await sharedGet(sessionKey(id));
+  if (!raw) return null;
+  try {
+    const held = JSON.parse(raw) as Held;
+    sessions.set(id, held);
+    return held;
+  } catch {
+    return null;
+  }
+}
+
+async function rememberSession(id: string): Promise<void> {
+  if (!sharedStoreConfigured()) return;
+  const held = sessions.get(id);
+  if (!held) return;
+  await sharedSet(sessionKey(id), JSON.stringify(held));
+}
+
+function sessionKey(id: string): string {
+  return `futureino:session:${id}`;
 }
