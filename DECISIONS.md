@@ -100,3 +100,45 @@ No application code exists yet. The finding behind these choices is from the bri
 **Why:** The live review will try to break the order. Tests on the engine are the thing to point at. Voice needs a speech key and is the step most likely to slip. The touch path can already show a complete order.
 
 **Revisit:** After the text agent works, if a speech key is already available and the engine tests are green.
+
+## 2026-10-01 — Catalog authored from all 48 photos
+
+**Decided:** The menu lives in `src/catalog` as TypeScript. Each item has an id matching its filename, a menu name, a one-line summary, a photo note, a price in USD cents, taste tags, `allergens: "unknown"`, and `requiresTemperature`. Boost Coffee is 18 items and every one requires hot, iced, or room. Snacks Bot is 30 items and none take a temperature. Prices are list prices we chose, in a vending range of about $1.60–$4.80. Taste tags are a fixed set (`sweet`, `light`, `rich`, `spicy`, and so on) so a vague request can be filtered in code.
+
+**Alternatives:**
+
+- Wait for the Next.js app and store the menu in a database.
+- One JSON file with free-typed tags.
+- Copy drink prices from the Futureino marketing site.
+
+**Why:** The order engine is next and needs a typed menu it can reject against. The photos are the source, and a database adds nothing until an operator is editing stock. The site's prices are sales copy for the machine, not a menu for this image pack.
+
+**Revisit:** If an operator needs to change a price without a deploy, move the same fields into a table. Do not loosen the types.
+
+**What we found:** Every photo in `images/coffee` and `images/snacks` was opened. None show a printed name, price, or ingredient list. Allergens stay unknown on every item. The coffee folder is a beverage menu, not coffee alone: it includes tea, matcha, juice, and chocolate-style drinks. The brief says every drink on that machine is hot, iced, or room temperature, so the temperature rule covers all 18, not only the coffee-looking ones.
+
+## 2026-10-01 — A visible peanut is not an allergen fact
+
+**Decided:** When the photo shows a peanut, almond, or similar food, the summary and photo note say what is visible. `allergens` stays `"unknown"`. The agent may say the picture shows something that looks like peanuts. It may not say the item is safe, and it may not state a confirmed allergen.
+
+**Alternatives:**
+
+- Set `allergens: ["peanuts"]` on any item where nuts are visible.
+- Leave the photo note out and let the model describe the image later.
+
+**Why:** The trust rule is that unknown facts, allergens especially, are spoken as unknown. A studio photo is not an ingredient panel. It also misses milk, gluten, and anything inside a coating. Putting the visible food in the data keeps the model from inventing a different snack, without promoting that description into a safety claim.
+
+**Revisit:** Only if a photo is replaced with one that shows a printed ingredient list. Record those allergens on that item and note the source.
+
+## 2026-10-01 — Covered Cup
+
+**Decided:** `coffee-15` is named Covered Cup, with `nameBasis: "contents-hidden"` and no taste tags. The lid is closed, nothing sits beside the cup, and the drink cannot be seen.
+
+**Alternatives:**
+
+- Assign a flavor such as house blend or cappuccino so the grid has no blank.
+- Drop the image from the menu.
+
+**Why:** The pack includes the image, so the machine can sell the item. Inventing a flavor would be a fact the photo does not support. Dropping it would hide a product the machine has. The agent has to say it does not know what is in the cup. The line still needs a temperature before the order is complete.
+
+**Revisit:** If Futureino names that frame. Until then the name stays a label, not a flavor.
