@@ -2,7 +2,7 @@
 
 Written as the work happens. Each entry records what was decided, the alternatives, why, and what to revisit.
 
-No application code exists yet. The finding behind these choices is from the brief and the asset pack: the coffee and snack photos are unlabeled studio shots. Sample images opened on 2026-10-01 (`coffee-01`, `coffee-08`, `snacks-01`) show no product name, price, or ingredient panel.
+The catalog and the order engine live in `src/`. The coffee and snack photos are unlabeled studio shots. None of the 48 photos show a printed name, price, or ingredient panel.
 
 ## 2026-10-01 — The order engine owns the cart
 
@@ -142,3 +142,20 @@ No application code exists yet. The finding behind these choices is from the bri
 **Why:** The pack includes the image, so the machine can sell the item. Inventing a flavor would be a fact the photo does not support. Dropping it would hide a product the machine has. The agent has to say it does not know what is in the cup. The line still needs a temperature before the order is complete.
 
 **Revisit:** If Futureino names that frame. Until then the name stays a label, not a flavor.
+
+## 2026-10-01 — Order engine rules
+
+**Decided:** `src/order/engine.ts` is a pure state machine and the only writer of a cart. A drink can sit in the draft without a temperature. `read_back` and `confirm` both refuse until every Boost Coffee line is hot, iced, or room. `confirm` must send the cart version the customer was shown. A mismatch is `stale_cart`. Saying yes to the new cart without a fresh read-back is `not_awaiting_confirmation`. Silence does not move `lastActivityAt`. At 20 seconds the engine prompts once. At 45 seconds it abandons the session, clears the cart, and a later yes fails. The same product at the same temperature merges. A quantity is 1–9. An edit after ready-to-pay returns the cart to drafting and needs a new read-back. A rejected product still counts as activity, so a wrong request does not look like a walk-away.
+
+**Alternatives:**
+
+- Refuse to add a drink until the temperature is already known.
+- Treat silence as activity so the idle clock resets whenever the mic is quiet.
+- Let a spoken yes apply to whatever is in the cart at that moment.
+- Skip the timeout and leave the cart up until the next customer starts a new session.
+
+**Why:** The review will try a missing temperature, an item from the other machine, a yes after the cart changed, a quiet customer, and someone walking off. Those are tests on this module. An incomplete draft matches the way people order: "a latte", then "iced". Pinning confirm to a version stops a yes from landing on a cart they did not just hear.
+
+**Revisit:** The 20s and 45s timings after a test in a noisy room. The quantity cap if a real machine allows larger orders.
+
+**How we checked:** `npm test` runs these cases against the catalog. No model is involved.
