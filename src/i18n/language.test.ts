@@ -4,6 +4,7 @@ import { answerWithRules } from "../agent/rules";
 import { createSession } from "../order/engine";
 import { detectLanguage, parseLanguageChoice } from "./detect";
 import { applyLanguageCue } from "./session";
+import { ui } from "./chrome";
 import { t } from "./phrases";
 
 function coffee(now = 0) {
@@ -28,6 +29,9 @@ describe("language detection", () => {
     assert.equal(detectLanguage("I want something else"), "en");
     // Bare English catalog name is not enough to lock English.
     assert.equal(detectLanguage("latte"), null);
+    assert.equal(ui("es", "welcome"), "Bienvenido");
+    assert.equal(ui("he", "back"), "חזרה");
+    assert.equal(ui("en", "welcome"), "Welcome");
   });
 
   it("stores preferred language once detected and only switches on explicit choice", () => {

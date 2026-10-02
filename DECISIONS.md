@@ -459,3 +459,23 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** A quiet clip came back as "context: ### Futureino menu words..." which does not start with the hint, so the old check let it through as "You said".
 
 **How we checked:** `isPromptEcho` in `src/agent/phrases.test.ts`.
+
+## 2026-10-02 — A language button on the welcome screen
+
+**Decided:** The welcome screen has a round button at the bottom, labeled with the current language code. It opens English, Español, Français, עברית, and Afrikaans. English stays selected until they tap another one. That choice is sent with the next clip and with a new order, so hearing and the spoken replies use it. Saying "speak Spanish" can still switch later. Until they tap, the first clip is still heard without a forced language.
+
+**Alternatives:** Guess the language from the first sentence only. Put five labels on the screen all the time.
+
+**Why:** A tap is reliable, and the welcome screen stays one circle until someone wants another language.
+
+**How we checked:** The welcome screen shows EN. Opening it lists the five languages, and choosing Español leaves the circle on ES.
+
+## 2026-10-02 — The screen follows the language button
+
+**Decided:** Choosing a language changes the words painted on the kiosk: welcome, the machines, the cart, review, pay, temperatures, and the talk button. Product names on the cards stay English. Hebrew lays the screen out right to left.
+
+**Alternatives:** Leave the screen in English and only translate what is spoken. Translate every product title.
+
+**Why:** A customer who taps Español should see Español on the machine, not only hear it.
+
+**How we checked:** `ui` in `src/i18n/language.test.ts`. On the welcome screen, Español changes Welcome to Bienvenido and the start line to Spanish.

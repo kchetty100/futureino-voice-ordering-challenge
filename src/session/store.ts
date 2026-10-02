@@ -81,8 +81,9 @@ export async function arriveSession(
   now = Date.now(),
   source: "text" | "voice" = "text",
   sttLanguageLabel?: string | null,
+  pinnedLanguage?: AppLanguage | null,
 ): Promise<ArriveResult> {
-  const seed = seedLanguage(text, sttLanguageLabel);
+  const seed = seedLanguage(text, sttLanguageLabel, pinnedLanguage);
   const machineId = machineForUtterance(text);
   if (!machineId) {
     const logId = beginLobby(now);
@@ -116,7 +117,12 @@ export async function arriveSession(
   return { ...(continued ?? opened), logId };
 }
 
-function seedLanguage(text: string, sttLanguageLabel?: string | null): { preferredLanguage: AppLanguage; languageSet: boolean } {
+function seedLanguage(
+  text: string,
+  sttLanguageLabel?: string | null,
+  pinnedLanguage?: AppLanguage | null,
+): { preferredLanguage: AppLanguage; languageSet: boolean } {
+  if (pinnedLanguage) return { preferredLanguage: pinnedLanguage, languageSet: true };
   const fromStt = languageFromSttLabel(sttLanguageLabel);
   const { fields } = applyLanguageCue(
     {
@@ -150,6 +156,17 @@ export async function openSession(
   await rememberSession(session.id);
   await saveRecord(session.id);
   return snapshot(held);
+}
+
+/** The welcome-screen language button. Later speech uses this until they ask to switch. */
+export async function assignLanguage(id: string, language: AppLanguage, now = Date.now()): Promise<SessionResponse | null> {
+  return enqueue(id, (held) => {
+    if (held.session.languageSet && held.session.preferredLanguage === language) return snapshot(held);
+    held.session = { ...held.session, preferredLanguage: language, languageSet: true };
+    recordTurn(id, { at: now, source: "touch", customer: `Language ${language}`, say: null });
+    recordState(id, held.session, now);
+    return snapshot(held);
+  });
 }
 
 export async function commandSession(id: string, command: OrderInput, now = Date.now()): Promise<SessionResponse | null> {

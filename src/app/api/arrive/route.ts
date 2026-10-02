@@ -1,6 +1,6 @@
 import { parseNavIntent } from "../../../agent/nav";
 import { isPromptEcho, speechPrompt } from "../../../catalog/index";
-import { detectLanguage, languageFromSttLabel, t } from "../../../i18n";
+import { detectLanguage, isAppLanguage, languageFromSttLabel, t, type AppLanguage } from "../../../i18n";
 import { claimSpeech, speechBudgetDenied, speechClientIp } from "../../../operator/budget";
 import { beginLobby, noteUsageFor, recordTurn, saveRecord } from "../../../operator/log";
 import { arriveSession } from "../../../session/store";
@@ -17,21 +17,24 @@ export async function POST(request: Request) {
   let sttLanguageLabel: string | null = null;
   let spoken = contentType.includes("application/json") ? ("text" as const) : ("voice" as const);
   let wake = false;
+  let pinnedLanguage: AppLanguage | null = null;
   if (contentType.includes("application/json")) {
-    const body = (await request.json()) as { text?: string };
+    const body = (await request.json()) as { text?: string; language?: string };
     text = body.text?.trim() ?? "";
+    pinnedLanguage = isAppLanguage(body.language) ? body.language : null;
     if (process.env.OPENAI_API_KEY && !(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
   } else {
     if (!process.env.OPENAI_API_KEY) return Response.json({ error: "Speech is not configured." }, { status: 503 });
     const form = await request.formData();
     wake = form.get("intent") === "wake";
+    const chosen = form.get("language");
+    pinnedLanguage = isAppLanguage(chosen) ? chosen : null;
     const audio = form.get("audio");
     if (!(audio instanceof File) || audio.size === 0) return Response.json({ error: "No audio." }, { status: 400 });
     if (audio.size > MAX_AUDIO_BYTES) return Response.json({ error: "That recording is too long." }, { status: 413 });
     if (!(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
     try {
-      // First utterance: do not force English; let STT auto-detect.
-      const heard = await transcribe(audio, PROMPT, clipSeconds(form), null);
+      const heard = await transcribe(audio, PROMPT, clipSeconds(form), pinnedLanguage);
       text = isPromptEcho(heard.text, PROMPT) ? "" : heard.text;
       usage = heard.usage;
       sttLanguageLabel = heard.detectedLanguage;
@@ -45,7 +48,7 @@ export async function POST(request: Request) {
     return Response.json({
       session: null,
       readBack: null,
-      say: text ? null : t("en", "didnt_catch"),
+      say: text ? null : t(pinnedLanguage, "didnt_catch"),
       notice: null,
       spotlightIds: [],
       switchTo: null,
@@ -108,7 +111,7 @@ export async function POST(request: Request) {
     });
   }
 
-  const arrived = await arriveSession(text, Date.now(), spoken, sttLanguageLabel);
+  const arrived = await arriveSession(text, Date.now(), spoken, sttLanguageLabel, pinnedLanguage);
   if (usage) {
     noteUsageFor(arrived.logId, usage);
     await saveRecord(arrived.logId);

@@ -225,6 +225,80 @@
   cursor: not-allowed;
 }
 
+.langDock {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 56px;
+  margin-top: 4px;
+}
+
+.langButton,
+.langButtonOn {
+  width: 56px;
+  height: 56px;
+  border-radius: 999px;
+  border: 1.5px solid #1b1430;
+  background: #fff;
+  color: #1b1430;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.langButtonOn {
+  background: #1b1430;
+  color: #fff;
+}
+
+.langMenu {
+  position: absolute;
+  bottom: 66px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: min(260px, 78vw);
+  padding: 8px;
+  border-radius: 22px;
+  border: 1.5px solid #1b1430;
+  background: #fff;
+}
+
+.langOption,
+.langOptionOn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #1b1430;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 650;
+  text-align: left;
+  padding: 0 14px;
+}
+
+.langOptionOn {
+  background: #1b1430;
+  color: #fff;
+}
+
+.langCode {
+  width: 28px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
 .attract .say {
   margin: 0;
   width: 100%;
