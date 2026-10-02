@@ -351,4 +351,18 @@ describe("order engine", () => {
     });
     assert.equal(late.reason, "session_abandoned");
   });
+
+  it("clears the cart without abandoning the session", () => {
+    const session = createSession({ id: "clear-1", machineId: "coffee", now: 0 });
+    const added = apply(session, { type: "add", productId: "coffee-01", temperature: "hot", now: 1 });
+    assert.equal(added.session.lines.length, 1);
+    const cleared = apply(added.session, { type: "clear", now: 2 });
+    assert.equal(cleared.ok, true);
+    assert.equal(cleared.session.lines.length, 0);
+    assert.equal(cleared.session.phase, "browsing");
+    assert.notEqual(cleared.session.phase, "abandoned");
+    const empty = apply(cleared.session, { type: "clear", now: 3 });
+    assert.equal(empty.ok, true);
+    assert.equal(empty.session.lines.length, 0);
+  });
 });

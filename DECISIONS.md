@@ -279,3 +279,79 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** The product grid and Review CTA were losing space to Talk + composer + cart lines. Voice is the intended path; typing is overflow. Turn state and spotlight need to read at arm's length.
 
 **Revisit:** Cart expand max-height if long orders feel cramped. Whether thinking should also block Talk end (currently Talk can still end).
+
+## 2026-10-02 — Local navigation voice commands
+
+**Decided:** Rules parse a small set of movement phrases before product search. `parseNavIntent` maps open/view cart, scroll up/down, and clear/empty cart. Machine returns ("return to coffee screen", "coffee machine", "show snacks", …) stay in `requestedMachine`. Clear uses a new engine `clear` that empties lines and stays in browsing (unlike `cancel`, which abandons). Turn results carry `ui: open_cart | scroll_up | scroll_down` so the kiosk can open the cart dock or scroll the grid. Confirm yes/no paths are unchanged and still win first.
+
+**Alternatives:** Let the model invent UI actions; reuse `cancel` for clear cart; drive scroll only from the browser with no server intent.
+
+**Why:** The review will ask to see the cart, jump machines, and scroll without naming a product. Those must work with no API key and must not confirm an order.
+
+**How we checked:** `npm test` and `npm run typecheck`. Phrase→intent cases live in `src/agent/phrases.test.ts`.
+
+## 2026-10-02 — Multi-language MVP
+
+**Decided:** Support five customer languages in this MVP: English (`en`), Spanish (`es`), Hebrew (`he`), French (`fr`), and Afrikaans (`af`). Session stores `preferredLanguage` and `languageSet`. Speech-to-text no longer hard-locks `language: "en"`; when the session language is unset, STT omits the language field so the model can auto-detect. `gpt-4o-mini-transcribe` only accepts `json`, so a `verbose_json` language label is not available and the spoken language is read from the words. When language is set, STT and TTS receive that language. Agent rule strings go through a small `src/i18n` phrase table (`t()`). Catalog product names stay English in spoken lines. Allergen replies stay “we don’t know” in every language — no invented ingredients. Explicit “speak Spanish / en español / עברית …” switches language even after lock; casual English product names after a Spanish lock do not flip back.
+
+**Alternatives:**
+
+- Full i18n of the kiosk chrome and every model prompt.
+- Rely on the LLM alone to reply in the customer’s language with no phrase table.
+- Force English STT forever and only translate TTS.
+
+**Why:** The brief requires non-English customers. A phrase table keeps greetings, clarifies, confirm read-back, nav, cart edits, and errors trustworthy without an API key. Auto-detect STT removes the English lock that blocked non-English audio. Catalog English names keep matching stable. Afrikaans covers Johannesburg; Hebrew covers the Futureino/Sweetrobo context; Spanish and French are common mall languages.
+
+**Tradeoffs / revisit:** Rules still match products mostly on English names/aliases, so “quiero un café con leche” may miss unless aliases cover it — the OpenAI understand path can help when a key is set. Yes/no/nav cues cover a small multilingual set, not every dialect. TTS `instructions` for non-English is best-effort. Expanding languages means adding phrase rows and cue words, not a new architecture.
+
+**How we checked:** `npm test` (includes `src/i18n/language.test.ts`) and `npm run typecheck`. No commit for this change set until asked.
+
+## 2026-10-02 — Attract + MachineChoice restyle
+
+**Decided:** Attract and MachineChoice match the attached portrait references while keeping Talk-first. Attract is white with the existing Futureino logo, a neon-outlined “Welcome to Futureino”, and a large circular gradient Talk CTA labeled “Tap to start” (listening / thinking / speaking states unchanged). Browse machines stays a secondary text control. MachineChoice title is “What are you after?” (not “What are you at?”). A mic + transcript row reuses Talk state; two large cards use coffee-01 / snacks-01 merch photos (no machine illustrations in `brand/`), catalog blurbs, and readable “Say: Coffee / Snacks” chips. Back + “or Say: Back”; spoken “back” returns to Attract and clears transcript. Menu / Review / Pay / dock turn-state unchanged.
+
+**Alternatives:** Side-by-side cards; invent new robot bitmaps; make the circular CTA tap-only to machines.
+
+**Why:** References set the look; prior voice-first Attract must not regress to tap-only. Product photos fill the illustration gap without new assets.
+
+**How we checked:** `npm run typecheck`.
+
+## 2026-10-02 — Hey Future
+
+**Decided:** The home screen says "Say Hey Future to start." Talk on that screen only transcribes. "Hey Future" (and a close mishear such as "hay future") opens the machine page. Any other words stay on the home screen. Browse machines still opens that page from a tap.
+
+**Alternatives:** Keep "say coffee or snacks" on the home screen and open a menu from the first product name.
+
+**Why:** The first words should wake the machine, and the next screen is where coffee or snacks is chosen.
+
+**How we checked:** `isHeyFuture` in `src/agent/phrases.test.ts`.
+
+## 2026-10-02 — Camera starts the microphone
+
+**Decided:** The kiosk camera looks for a face. Two frames in a row open the microphone. About two seconds with no face closes it. A small mirrored preview and a status line stay on the screen. Tap to start still works, and it is the gesture that can grant the camera and the mic. Stopping Talk while a face is still there stays stopped until the person leaves and comes back. The video stays on the device. Nothing from the camera is uploaded.
+
+**Alternatives:** Start the mic on any motion in the frame. Hide the camera. Require a tap every time someone walks up.
+
+**Why:** A person standing at the machine should be able to say Hey Future without hunting for the button. Motion in a mall would open the mic for people walking past. The preview makes the camera obvious.
+
+**How we checked:** `nextPresence` in `src/kiosk/presence.test.ts`. The home screen shows the camera status. A face in the automated browser could not be confirmed.
+
+## 2026-10-02 — Mic closes while the machine speaks
+
+**Decided:** The level meter uses its own audio context, separate from playback. The camera opens video only. The microphone closes before a reply is spoken, then opens again after a short gap. Automatic gain on the mic is off.
+
+**Alternatives:** Leave the mic open for the whole visit. Keep measuring the mic inside the same context that plays the reply.
+
+**Why:** On a Mac, an open mic with echo cancellation runs the speakers through voice processing, so the reply sounds like it is in a live room. A second mic from the camera made that start as soon as the page loaded. The meter and the speakers were also sharing one context, so the mic could color the playback.
+
+**How we checked:** The home screen still shows the camera. Listening still waits out six seconds of quiet. A spoken reply in the room was not re-checked from this browser.
+
+## 2026-10-02 — One tab speaks
+
+**Decided:** If more than one kiosk tab is open, only the tab that was focused last listens and speaks. The others close the mic and drop playback.
+
+**Alternatives:** Let every open tab play the reply. Ask the customer to close tabs.
+
+**Why:** Each open tab was hearing the same sentence and speaking the reply, so the voice came out twice. The server log showed two sessions receiving speech at the same moment.
+
+**How we checked:** `otherTabLeads` in `src/kiosk/solo.test.ts`. The dev log showed paired `/speech` calls before this change.

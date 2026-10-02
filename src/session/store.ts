@@ -2,7 +2,7 @@ import { machineIntro, machineForUtterance, requestedMachine } from "../agent/ar
 import { getItem, type MachineId } from "../catalog/index";
 import { beginLobby, beginRecord, duringSession, loadRecord, recordState, recordTurn, saveRecord } from "../operator/log";
 import { sharedGet, sharedSet, sharedStoreConfigured } from "../persist/remote";
-import { answerWithRules, type TurnResult } from "../agent/rules";
+import { answerWithRules, type TurnResult, type UiCommand } from "../agent/rules";
 import { takeTurn } from "../agent/turn";
 import {
   apply,
@@ -12,6 +12,13 @@ import {
   type ReadBack,
   type RejectReason,
 } from "../order/engine";
+import {
+  applyLanguageCue,
+  langOf,
+  languageFromSttLabel,
+  t,
+  type AppLanguage,
+} from "../i18n";
 
 export type SessionResponse = {
   session: OrderSession | null;
@@ -20,6 +27,7 @@ export type SessionResponse = {
   notice: string | null;
   spotlightIds: string[];
   switchTo: MachineId | null;
+  ui: UiCommand | null;
 };
 
 export type ArriveResult = SessionResponse & { logId: string };
@@ -41,23 +49,26 @@ scope.futureinoSessions = sessions;
 const tails = scope.futureinoTails ?? new Map<string, Promise<void>>();
 scope.futureinoTails = tails;
 
-const NOTICES: Record<RejectReason, string> = {
-  session_abandoned: "This order was cleared.",
-  unknown_product: "That item is not on this machine.",
-  wrong_machine: "That item is not on this machine.",
-  invalid_quantity: "Choose a quantity from 1 to 9.",
-  invalid_temperature: "Choose hot, iced, or room.",
-  temperature_not_allowed: "Snacks do not take a temperature.",
-  unknown_line: "That line is no longer in the cart.",
-  cart_empty: "Add something first.",
-  incomplete: "Choose hot, iced, or room temperature first.",
-  not_awaiting_confirmation: "Review the order before confirming.",
-  stale_cart: "That order changed. Review it again.",
-};
+function noticeFor(session: OrderSession, reason: RejectReason): string {
+  // Touch notices stay short; share the same translated reject keys when available.
+  const key = reason === "cart_empty" ? "cart_empty" : reason;
+  return t(langOf(session), key);
+}
 
 export async function sessionMachine(id: string): Promise<MachineId | null> {
   const held = await recallSession(id);
   return held?.session.machineId ?? null;
+}
+
+export async function recallLanguage(
+  id: string,
+): Promise<{ preferredLanguage: AppLanguage; languageSet: boolean } | null> {
+  const held = await recallSession(id);
+  if (!held) return null;
+  return {
+    preferredLanguage: held.session.preferredLanguage,
+    languageSet: held.session.languageSet,
+  };
 }
 
 export function forgetLocalSessions() {
@@ -69,11 +80,13 @@ export async function arriveSession(
   text: string,
   now = Date.now(),
   source: "text" | "voice" = "text",
+  sttLanguageLabel?: string | null,
 ): Promise<ArriveResult> {
+  const seed = seedLanguage(text, sttLanguageLabel);
   const machineId = machineForUtterance(text);
   if (!machineId) {
     const logId = beginLobby(now);
-    const say = "Boost Coffee or Snacks Bot?";
+    const say = t(seed.preferredLanguage, "choose_machine");
     recordTurn(logId, { at: now, source, customer: text, say });
     await saveRecord(logId);
     return {
@@ -83,27 +96,54 @@ export async function arriveSession(
       notice: null,
       spotlightIds: [],
       switchTo: null,
+      ui: null,
       logId,
     };
   }
-  const opened = await openSession(machineId, now);
+  const opened = await openSession(machineId, now, seed);
   const logId = opened.session?.id ?? beginLobby(now);
   if (!opened.session) {
     await saveRecord(logId);
     return { ...opened, logId };
   }
   if (requestedMachine(text) === machineId) {
-    const intro = machineIntro(machineId);
+    const intro = machineIntro(machineId, langOf(opened.session));
     recordTurn(logId, { at: now, source, customer: text, say: intro.say });
     await saveRecord(logId);
     return { ...opened, say: intro.say, spotlightIds: intro.spotlightIds, logId };
   }
-  const continued = await messageSession(opened.session.id, text, now, source);
+  const continued = await messageSession(opened.session.id, text, now, source, sttLanguageLabel);
   return { ...(continued ?? opened), logId };
 }
 
-export async function openSession(machineId: MachineId, now = Date.now()): Promise<SessionResponse> {
-  const session = createSession({ id: crypto.randomUUID(), machineId, now });
+function seedLanguage(text: string, sttLanguageLabel?: string | null): { preferredLanguage: AppLanguage; languageSet: boolean } {
+  const fromStt = languageFromSttLabel(sttLanguageLabel);
+  const { fields } = applyLanguageCue(
+    {
+      preferredLanguage: fromStt ?? "en",
+      languageSet: Boolean(fromStt && fromStt !== "en"),
+    },
+    text,
+  );
+  // If STT named a supported language and text didn't override, keep it.
+  if (!fields.languageSet && fromStt) {
+    return { preferredLanguage: fromStt, languageSet: true };
+  }
+  return fields;
+}
+
+export async function openSession(
+  machineId: MachineId,
+  now = Date.now(),
+  language?: { preferredLanguage: AppLanguage; languageSet: boolean },
+): Promise<SessionResponse> {
+  const session = createSession({
+    id: crypto.randomUUID(),
+    machineId,
+    now,
+    preferredLanguage: language?.preferredLanguage,
+    languageSet: language?.languageSet,
+  });
   const held: Held = { session, readBack: null, say: null, notice: null, spotlightIds: [] };
   sessions.set(session.id, held);
   beginRecord(session, now);
@@ -119,7 +159,7 @@ export async function commandSession(id: string, command: OrderInput, now = Date
     held.session = result.session;
     held.say = null;
     held.spotlightIds = [];
-    held.notice = result.ok ? null : NOTICES[result.reason ?? "cart_empty"];
+    held.notice = result.ok ? null : noticeFor(held.session, result.reason ?? "cart_empty");
     if (result.readBack && (result.session.phase === "awaiting_confirmation" || result.session.phase === "ready_to_pay")) {
       held.readBack = result.readBack;
     }
@@ -132,7 +172,7 @@ export async function commandSession(id: string, command: OrderInput, now = Date
         at: now,
         source: "touch",
         customer: label,
-        say: result.ok ? null : NOTICES[result.reason ?? "cart_empty"],
+        say: result.ok ? null : noticeFor(result.session, result.reason ?? "cart_empty"),
       });
     }
     if (command.type === "tick" && before.phase !== "abandoned" && result.session.phase === "abandoned") {
@@ -140,7 +180,7 @@ export async function commandSession(id: string, command: OrderInput, now = Date
         at: now,
         source: "system",
         customer: null,
-        say: "The customer walked away. The cart was cleared.",
+        say: t(langOf(before), "walked_away"),
       });
     }
     recordState(id, result.session, now);
@@ -153,13 +193,24 @@ export async function messageSession(
   text: string,
   now = Date.now(),
   source: "text" | "voice" = "text",
+  sttLanguageLabel?: string | null,
 ): Promise<SessionResponse | null> {
   return enqueue(id, async (held) => {
+    if (!held.session.languageSet) {
+      const fromStt = languageFromSttLabel(sttLanguageLabel);
+      if (fromStt) {
+        held.session = {
+          ...held.session,
+          preferredLanguage: fromStt,
+          languageSet: true,
+        };
+      }
+    }
     const turn = await duringSession(id, () => takeTurn(held.session, text, now));
     remember(held, turn);
     recordTurn(id, { at: now, source, customer: text, say: turn.say });
     recordState(id, turn.session, now);
-    return snapshot(held, turn.switchTo);
+    return snapshot(held, turn.switchTo, turn.ui);
   });
 }
 
@@ -173,10 +224,19 @@ function remember(held: Held, turn: TurnResult) {
   held.say = turn.say;
   held.notice = null;
   held.spotlightIds = turn.spotlightIds;
-  held.readBack = turn.readBack;
+  if (turn.readBack) {
+    held.readBack = turn.readBack;
+  } else if (
+    turn.ui &&
+    (turn.session.phase === "awaiting_confirmation" || turn.session.phase === "ready_to_pay")
+  ) {
+    // Keep the review/pay cart when the turn only moved the screen (cart/scroll).
+  } else {
+    held.readBack = turn.readBack;
+  }
 }
 
-function snapshot(held: Held, switchTo: MachineId | null = null): SessionResponse {
+function snapshot(held: Held, switchTo: MachineId | null = null, ui: UiCommand | null = null): SessionResponse {
   return {
     session: held.session,
     readBack: held.readBack,
@@ -184,6 +244,7 @@ function snapshot(held: Held, switchTo: MachineId | null = null): SessionRespons
     notice: held.notice,
     spotlightIds: held.spotlightIds,
     switchTo,
+    ui,
   };
 }
 
@@ -216,6 +277,8 @@ function touchLine(session: OrderSession, command: OrderInput): string | null {
       return "Tapped change order";
     case "cancel":
       return "Cancelled the order";
+    case "clear":
+      return "Cleared the cart";
     default:
       return null;
   }
@@ -248,6 +311,11 @@ async function recallSession(id: string): Promise<Held | null> {
   if (!raw) return null;
   try {
     const held = JSON.parse(raw) as Held;
+    held.session = {
+      ...held.session,
+      preferredLanguage: held.session.preferredLanguage ?? "en",
+      languageSet: held.session.languageSet ?? false,
+    };
     sessions.set(id, held);
     return held;
   } catch {

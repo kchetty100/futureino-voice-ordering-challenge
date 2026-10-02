@@ -1,4 +1,5 @@
 import { getItem, TEMPERATURES, type MachineId, type Temperature } from "../catalog/index";
+import type { AppLanguage } from "../i18n";
 
 /**
  * The only writer of a cart. Voice and touch both send commands here.
@@ -42,6 +43,10 @@ export type OrderSession = {
   createdAt: number;
   lastActivityAt: number;
   idlePrompted: boolean;
+  /** Customer-facing reply language for say/TTS. Defaults to English until detected or chosen. */
+  preferredLanguage: AppLanguage;
+  /** Once true, only an explicit language choice may change preferredLanguage. */
+  languageSet: boolean;
 };
 
 export type MissingField = {
@@ -90,6 +95,7 @@ export type OrderInput =
   | { type: "revise" }
   | { type: "activity" }
   | { type: "cancel" }
+  | { type: "clear" }
   | { type: "silence" }
   | { type: "tick" };
 
@@ -109,6 +115,8 @@ export function createSession(input: {
   id: string;
   machineId: MachineId;
   now: number;
+  preferredLanguage?: AppLanguage;
+  languageSet?: boolean;
 }): OrderSession {
   if (input.machineId !== "coffee" && input.machineId !== "snacks") {
     throw new Error(`Unknown machine: ${input.machineId}`);
@@ -125,6 +133,8 @@ export function createSession(input: {
     createdAt: input.now,
     lastActivityAt: input.now,
     idlePrompted: false,
+    preferredLanguage: input.preferredLanguage ?? "en",
+    languageSet: input.languageSet ?? false,
   };
 }
 
@@ -159,6 +169,8 @@ export function apply(session: OrderSession, command: OrderCommand): ApplyResult
       return ok(touch(session, command.now));
     case "cancel":
       return ok(abandon(touch(session, command.now)));
+    case "clear":
+      return applyClear(session, command.now);
     default: {
       const unreachable: never = command;
       return unreachable;
@@ -348,6 +360,14 @@ function applyConfirm(
     confirmedBy: command.source,
   };
   return { ...ok(next), readBack: buildReadBack(next) };
+}
+
+/** Empty the cart without abandoning the session. */
+function applyClear(session: OrderSession, now: number): ApplyResult {
+  if (session.lines.length === 0) {
+    return ok(touch(session, now));
+  }
+  return ok(editCart(session, [], now));
 }
 
 function abandon(session: OrderSession): OrderSession {

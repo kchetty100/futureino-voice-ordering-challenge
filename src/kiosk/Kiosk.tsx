@@ -9,6 +9,12 @@ import {
   type MachineId,
   type Temperature,
 } from "../catalog/index";
+import type { UiCommand } from "../agent/nav";
+import { t } from "../i18n";
+import { isHeyFuture } from "../agent/arrive";
+import { watchLabel } from "./presence";
+import { useSoloKiosk } from "./solo";
+import { useCustomerWatch } from "./watch";
 import { type OrderInput, type OrderSession, type ReadBack } from "../order/engine";
 import styles from "./kiosk.module.css";
 
@@ -32,6 +38,7 @@ type ServerState = {
   notice: string | null;
   spotlightIds: string[];
   switchTo?: MachineId | null;
+  ui?: UiCommand | null;
   transcript?: string | null;
   audioBase64?: string | null;
 };
@@ -48,13 +55,18 @@ export function Kiosk() {
   const [spotlightIds, setSpotlightIds] = useState<string[]>([]);
   const [menu, setMenu] = useState<MachineId | null>(null);
   const [showMenu, setShowMenu] = useState(false);
+  const [uiPulse, setUiPulse] = useState<{ command: UiCommand; id: number } | null>(null);
   const requestSeq = useRef(0);
   const liveSessionId = useRef<string | null>(null);
   const seenActivity = useRef(0);
   const seenCart = useRef(0);
   const audioCtx = useRef<AudioContext | null>(null);
+  const meterCtx = useRef<AudioContext | null>(null);
   const voice = useRef<AudioBufferSourceNode | null>(null);
   const speakingNow = useRef(false);
+  const leading = useSoloKiosk();
+  const soloRef = useRef(true);
+  soloRef.current = leading;
 
   function audioContext(): AudioContext {
     if (!audioCtx.current) audioCtx.current = new AudioContext();
@@ -76,20 +88,32 @@ export function Kiosk() {
     setSpeaking(false);
   }
 
-  function armAudio() {
-    const context = audioContext();
-    void context.resume();
+  function armAudio(): AudioContext {
+    const playback = audioContext();
+    void playback.resume();
+    if (!meterCtx.current) meterCtx.current = new AudioContext();
+    void meterCtx.current.resume();
+    return meterCtx.current;
   }
 
   async function play(base64: string) {
+    if (!soloRef.current) return;
     stopPlayback();
     speakingNow.current = true;
     setSpeaking(true);
     try {
       const context = audioContext();
       await context.resume();
+      if (!soloRef.current) {
+        stopPlayback();
+        return;
+      }
       const binary = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
       const buffer = await context.decodeAudioData(binary.buffer.slice(0));
+      if (!soloRef.current) {
+        stopPlayback();
+        return;
+      }
       const source = context.createBufferSource();
       source.buffer = buffer;
       source.connect(context.destination);
@@ -111,17 +135,46 @@ export function Kiosk() {
   async function post(url: string, body: unknown, tick = false): Promise<ServerState | null> {
     const mine = tick ? requestSeq.current : ++requestSeq.current;
     const isAudio = body instanceof FormData;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: isAudio ? undefined : { "content-type": "application/json" },
-      body: isAudio ? body : JSON.stringify(body),
-    });
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: "POST",
+        headers: isAudio ? undefined : { "content-type": "application/json" },
+        body: isAudio ? body : JSON.stringify(body),
+      });
+    } catch {
+      if (!tick && mine === requestSeq.current) {
+        setNotice("Couldn't reach the machine. Check the connection and try Talk again.");
+      }
+      return null;
+    }
     if (!response.ok) {
-      if (!tick && mine === requestSeq.current) setNotice("The machine missed that. Try again.");
+      let message = "Couldn't reach the machine. Check the connection and try Talk again.";
+      try {
+        const payload = (await response.json()) as { error?: string };
+        if (payload.error) message = payload.error;
+      } catch {
+        // The body was not JSON. Keep the connection message.
+      }
+      if (!tick && mine === requestSeq.current) setNotice(message);
       return null;
     }
     const state = (await response.json()) as ServerState;
     if (mine !== requestSeq.current) return state;
+    if (!tick && stage === "attract") {
+      const transcript = typeof state.transcript === "string" ? state.transcript.trim() : "";
+      setHeard(transcript || null);
+      setNotice(null);
+      setSpotlightIds([]);
+      setReadBack(null);
+      if (isHeyFuture(transcript)) {
+        setSay(null);
+        setStage("machines");
+        return state;
+      }
+      setSay(transcript ? "Say Hey Future to start." : state.say ?? "Say Hey Future to start.");
+      return state;
+    }
     const nextSession = state.session;
     if (nextSession && !isNewerSession(nextSession, tick)) return state;
     if (state.switchTo) {
@@ -129,6 +182,11 @@ export function Kiosk() {
       setShowMenu(true);
     } else if (!tick && state.readBack && (nextSession?.phase === "awaiting_confirmation" || nextSession?.phase === "ready_to_pay")) {
       setShowMenu(false);
+    }
+    if (!tick && state.ui) {
+      // Scroll and cart dock live on the menu grid.
+      setShowMenu(true);
+      setUiPulse((prev) => ({ command: state.ui!, id: (prev?.id ?? 0) + 1 }));
     }
     if (tick) {
       if (nextSession && liveSessionId.current === nextSession.id) {
@@ -221,24 +279,60 @@ export function Kiosk() {
   }
 
   function sendClip(clip: { blob: Blob; seconds: number }) {
+    if (!soloRef.current) return Promise.resolve(null);
     setPicker(null);
     const body = new FormData();
     const ext = clip.blob.type.includes("mp4") ? "mp4" : clip.blob.type.includes("ogg") ? "ogg" : "webm";
     body.append("audio", clip.blob, `talk.${ext}`);
     body.append("seconds", String(clip.seconds));
-    if (!session) return post("/api/arrive", body);
+    if (!session) {
+      if (stage === "attract") body.append("intent", "wake");
+      return post("/api/arrive", body);
+    }
     return post(`/api/sessions/${session.id}/speech`, body);
   }
 
+  const [camera, setCamera] = useState<HTMLVideoElement | null>(null);
+  const watch = useCustomerWatch(camera);
+  const paused = useRef(false);
   const talk = useConversation({
     enabled: session === null || session.phase !== "abandoned",
     onClip: sendClip,
     onArm: armAudio,
     onStop: stopPlayback,
     onMiss: setNotice,
+    onSilent: () => setSay("Say Hey Future to start."),
     isSpeaking: () => speakingNow.current,
   });
+  const talkRef = useRef(talk);
+  talkRef.current = talk;
 
+  useEffect(() => {
+    if (!leading) {
+      talkRef.current.stop();
+      stopPlayback();
+      return;
+    }
+    if (watch.present) {
+      if (!paused.current) talkRef.current.start();
+      return;
+    }
+    paused.current = false;
+    talkRef.current.stop();
+  }, [watch.present, leading]);
+
+  function onTalk() {
+    watch.enable();
+    if (talk.phase === "off") {
+      paused.current = false;
+      talk.start();
+    } else {
+      paused.current = true;
+      talk.stop();
+    }
+  }
+
+  const thinking = talk.phase === "thinking";
   const ended = !session || session.phase === "abandoned";
   const item = picker ? getItem(picker.productId) : undefined;
 
@@ -251,18 +345,25 @@ export function Kiosk() {
           heard={heard}
           speaking={speaking}
           talkPhase={talk.phase}
-          onToggleTalk={talk.toggle}
-          onBack={() => setStage("attract")}
+          onToggleTalk={onTalk}
+          onBack={() => {
+            setHeard(null);
+            setSay(null);
+            setStage("attract");
+          }}
           onStart={start}
+          thinking={thinking}
         />
       ) : (
         <Attract
           say={say}
           heard={heard}
+          notice={notice}
           speaking={speaking}
           talkPhase={talk.phase}
-          onToggleTalk={talk.toggle}
+          onToggleTalk={onTalk}
           onStart={() => setStage("machines")}
+          thinking={thinking}
         />
       );
   } else if (session.phase === "ready_to_pay" && readBack) {
@@ -273,10 +374,11 @@ export function Kiosk() {
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
-        onToggleTalk={talk.toggle}
+        onToggleTalk={onTalk}
         onSend={send}
         onChange={() => void run({ type: "revise" })}
         onNew={cancel}
+        thinking={thinking}
       />
     );
   } else if (!showMenu && session.phase === "awaiting_confirmation" && readBack) {
@@ -288,7 +390,7 @@ export function Kiosk() {
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
-        onToggleTalk={talk.toggle}
+        onToggleTalk={onTalk}
         onSend={send}
         onConfirm={() =>
           void run({
@@ -298,21 +400,23 @@ export function Kiosk() {
           })
         }
         onChange={() => void run({ type: "revise" })}
+        thinking={thinking}
       />
     );
   } else {
     body = (
-          <Menu
-            session={session}
-            menu={menu ?? session.machineId}
-            onMenu={setMenu}
+      <Menu
+        session={session}
+        menu={menu ?? session.machineId}
+        onMenu={setMenu}
         notice={notice}
         say={say}
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
-        onToggleTalk={talk.toggle}
+        onToggleTalk={onTalk}
         spotlightIds={spotlightIds}
+        uiPulse={uiPulse}
         onSend={send}
         onCancel={cancel}
         onPick={(productId) => setPicker({ productId })}
@@ -321,19 +425,33 @@ export function Kiosk() {
         onSetTemp={(lineId, temperature) => void run({ type: "set_temperature", lineId, temperature })}
         onRemove={(lineId) => void run({ type: "remove_line", lineId })}
         onReview={() => void run({ type: "read_back" })}
+        thinking={thinking}
       />
     );
   }
 
   return (
     <main className={styles.frame}>
-      <section className={styles.screen} aria-label="Vending machine">
+      <section className={styles.screen} aria-label="Vending machine" aria-busy={thinking || undefined}>
+        <video
+          ref={setCamera}
+          className={watch.status === "looking" || watch.status === "seen" || watch.status === "starting" ? styles.camera : styles.cameraHidden}
+          muted
+          playsInline
+          aria-label="Camera looking for a customer"
+        />
+        {watchLabel(watch.status) ? (
+          <p className={watch.status === "looking" || watch.status === "seen" ? styles.cameraNoteOn : styles.cameraNote}>
+            {watchLabel(watch.status)}
+          </p>
+        ) : null}
         {body}
         {item && session && session.phase !== "abandoned" && session.phase !== "ready_to_pay" ? (
           <ProductSheet
             item={item}
             lineId={picker?.lineId}
             session={session}
+            busy={thinking}
             onClose={() => {
               void run({ type: "activity" });
               setPicker(null);
@@ -363,7 +481,7 @@ export function Kiosk() {
         {session && session.idlePrompted && session.phase !== "abandoned" && session.phase !== "ready_to_pay" ? (
           <div className={styles.idle} role="dialog" aria-labelledby="idle-title">
             <div className={styles.idleCard}>
-              <h2 id="idle-title">Still there?</h2>
+              <h2 id="idle-title">{t(session.preferredLanguage, "still_there")}</h2>
               <p className={styles.summary}>The order will clear if nobody is at the machine.</p>
               <button type="button" className={styles.primary} onClick={() => void run({ type: "activity" })}>
                 I'm here
@@ -382,27 +500,33 @@ export function Kiosk() {
 function Attract({
   say,
   heard,
+  notice,
   speaking,
   talkPhase,
   onToggleTalk,
   onStart,
+  thinking,
 }: {
   say: string | null;
   heard: string | null;
+  notice: string | null;
   speaking: boolean;
   talkPhase: TalkPhase;
   onToggleTalk: () => void;
   onStart: () => void;
+  thinking: boolean;
 }) {
   return (
     <div className={styles.attract}>
       <img className={styles.logo} src="/brand/futureino-logo-trimmed.png" alt="Futureino" />
-      <div className={styles.stack}>
-        <p className={styles.attractCopy}>Boost Coffee and Snacks Bot</p>
+      <h1 className={styles.welcome}>Welcome</h1>
+      <div className={styles.attractHero}>
         <Reply say={say} heard={heard} />
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
-        <button type="button" className={styles.primary} onClick={onStart}>
-          Tap to start
+        {notice ? <p className={styles.notice}>{notice}</p> : null}
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} circle startLabel={"Tap to\nstart"} />
+        <p className={styles.attractHint}>Say Hey Future to start</p>
+        <button type="button" className={styles.attractBrowse} onClick={onStart} disabled={thinking}>
+          Or browse machines
         </button>
       </div>
     </div>
@@ -417,6 +541,7 @@ function MachineChoice({
   onToggleTalk,
   onBack,
   onStart,
+  thinking,
 }: {
   say: string | null;
   heard: string | null;
@@ -425,25 +550,68 @@ function MachineChoice({
   onToggleTalk: () => void;
   onBack: () => void;
   onStart: (machineId: MachineId) => void;
+  thinking: boolean;
 }) {
+  useEffect(() => {
+    if (!heard) return;
+    if (/^\s*(go\s+)?back[.!?]?\s*$/i.test(heard)) onBack();
+  }, [heard, onBack]);
+
+  const live = talkPhase !== "off" || speaking || Boolean(heard) || Boolean(say);
+  const art: Record<MachineId, string> = {
+    coffee: "/images/coffee/coffee-01.webp",
+    snacks: "/images/snacks/snacks-01.webp",
+  };
+  const sayWord: Record<MachineId, string> = { coffee: "Coffee", snacks: "Snacks" };
+
   return (
     <div className={styles.choose}>
-      <div>
-        <p className={styles.kicker}>Choose a machine</p>
-        <h1 className={styles.title}>What are you at?</h1>
-        <Reply say={say} heard={heard} />
+      <div className={styles.chooseHead}>
+        <h1 className={styles.chooseTitle}>What are you after?</h1>
+        <div className={styles.voiceRow} data-live={live || undefined}>
+          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} mic />
+          <div className={styles.voiceTranscript} role="status">
+            {heard ? (
+              <p className={styles.heard}>You said: “{heard}”</p>
+            ) : say ? (
+              <p className={styles.sayLine}>{say}</p>
+            ) : talkPhase === "listening" ? (
+              <p className={styles.voiceIdle}>Listening…</p>
+            ) : talkPhase === "thinking" ? (
+              <p className={styles.voiceIdle}>Thinking…</p>
+            ) : speaking ? (
+              <p className={styles.voiceIdle}>Speaking…</p>
+            ) : (
+              <p className={styles.voiceIdle}>Tap the mic, or say Coffee / Snacks</p>
+            )}
+          </div>
+        </div>
       </div>
-      <div className={styles.stack}>
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
+      <div className={styles.machineCards}>
         {(Object.keys(MACHINES) as MachineId[]).map((id) => (
-          <button key={id} type="button" className={styles.machine} onClick={() => onStart(id)}>
-            <strong>{MACHINES[id].name}</strong>
-            <span>{MACHINES[id].blurb}</span>
+          <button
+            key={id}
+            type="button"
+            className={styles.machineCard}
+            onClick={() => onStart(id)}
+            disabled={thinking}
+          >
+            <span className={styles.machineArt} aria-hidden>
+              <img src={art[id]} alt="" />
+            </span>
+            <span className={styles.machineBody}>
+              <strong>{MACHINES[id].name}</strong>
+              <span className={styles.machineBlurb}>{MACHINES[id].blurb}</span>
+              <span className={styles.sayHint}>Say: {sayWord[id]}</span>
+            </span>
           </button>
         ))}
-        <button type="button" className={styles.ghost} onClick={onBack}>
+      </div>
+      <div className={styles.chooseFoot}>
+        <button type="button" className={styles.backBtn} onClick={onBack} disabled={thinking}>
           Back
         </button>
+        <p className={styles.orSay}>or Say: Back</p>
       </div>
     </div>
   );
@@ -460,6 +628,7 @@ function Menu({
   talkPhase,
   onToggleTalk,
   spotlightIds,
+  uiPulse,
   onSend,
   onCancel,
   onPick,
@@ -468,6 +637,7 @@ function Menu({
   onSetTemp,
   onRemove,
   onReview,
+  thinking,
 }: {
   session: OrderSession;
   menu: MachineId;
@@ -479,6 +649,7 @@ function Menu({
   talkPhase: TalkPhase;
   onToggleTalk: () => void;
   spotlightIds: string[];
+  uiPulse: { command: UiCommand; id: number } | null;
   onSend: (text: string) => void;
   onCancel: () => void;
   onPick: (productId: string) => void;
@@ -487,12 +658,43 @@ function Menu({
   onSetTemp: (lineId: string, temperature: Temperature) => void;
   onRemove: (lineId: string) => void;
   onReview: () => void;
+  thinking: boolean;
 }) {
   const products = itemsForMachine(menu);
   const missing = new Set(
     session.lines.filter((line) => getItem(line.productId)?.requiresTemperature && !line.temperature).map((line) => line.lineId),
   );
   const count = session.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const [cartOpen, setCartOpen] = useState(false);
+  const [typeOpen, setTypeOpen] = useState(false);
+  const gridRef = useRef<HTMLDivElement>(null);
+  const spotlightKey = spotlightIds.join("|");
+
+  useEffect(() => {
+    if (!spotlightIds.length || !gridRef.current) return;
+    const first = spotlightIds[0];
+    const card = gridRef.current.querySelector<HTMLElement>(`[data-product-id="${first}"]`);
+    card?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [spotlightKey, spotlightIds]);
+
+  useEffect(() => {
+    if (!uiPulse) return;
+    if (uiPulse.command === "open_cart") {
+      setCartOpen(true);
+      return;
+    }
+    const grid = gridRef.current;
+    if (!grid) return;
+    const delta = Math.max(180, Math.floor(grid.clientHeight * 0.7));
+    grid.scrollBy({ top: uiPulse.command === "scroll_down" ? delta : -delta, behavior: "smooth" });
+  }, [uiPulse]);
+
+  useEffect(() => {
+    if (session.lines.length === 0) setCartOpen(false);
+  }, [session.lines.length]);
+
+  const total = cartTotal(session);
+  const networkFail = notice?.includes("Couldn't reach the machine");
 
   return (
     <>
@@ -508,24 +710,31 @@ function Menu({
                 className={id === menu ? styles.menuOn : styles.menuOff}
                 aria-pressed={id === menu}
                 onClick={() => onMenu(id)}
+                disabled={thinking}
               >
                 {MACHINES[id].name}
               </button>
             ))}
           </div>
         </div>
-        <button type="button" className={styles.linkish} onClick={onCancel}>
+        <button type="button" className={styles.linkish} onClick={onCancel} disabled={thinking}>
           Start over
         </button>
       </header>
       <Reply say={say} heard={heard} />
-      <div className={styles.grid}>
+      <div
+        ref={gridRef}
+        className={thinking ? `${styles.grid} ${styles.gridBusy}` : styles.grid}
+        aria-busy={thinking || undefined}
+      >
         {products.map((product) => (
           <button
             key={product.id}
             type="button"
+            data-product-id={product.id}
             className={spotlightIds.includes(product.id) ? `${styles.card} ${styles.spot}` : styles.card}
             onClick={() => onPick(product.id)}
+            disabled={thinking}
           >
             <img src={`/${product.imagePath}`} alt="" />
             <span className={styles.cardName}>{product.name}</span>
@@ -534,71 +743,118 @@ function Menu({
         ))}
       </div>
       <footer className={styles.dock} aria-label="Cart">
-        {session.lines.length === 0 ? <p className={styles.empty}>Tap a product to add it.</p> : null}
-        <div className={styles.lines}>
-          {session.lines.map((line) => {
-            const product = getItem(line.productId);
-            const unit = product?.priceCents ?? 0;
-            return (
-              <div key={line.lineId} className={styles.line}>
-                <strong>
-                  {product?.name ?? line.productId}
-                  {line.quantity > 1 ? ` × ${line.quantity}` : ""}
-                </strong>
-                <span className={styles.price}>{money(unit * line.quantity)}</span>
-                {line.temperature ? (
-                  <button
-                    type="button"
-                    className={styles.meta}
-                    onClick={() => onEditTemp(line.lineId, line.productId)}
-                  >
-                    {TEMPS.find((temp) => temp.id === line.temperature)?.label}
-                  </button>
-                ) : null}
-                {missing.has(line.lineId) ? (
-                  <div className={styles.tempPick} role="group" aria-label={`Temperature for ${product?.name ?? "drink"}`}>
-                    {TEMPS.map((temp) => (
-                      <button key={temp.id} type="button" onClick={() => onSetTemp(line.lineId, temp.id)}>
-                        {temp.label}
-                      </button>
-                    ))}
+        {count === 0 ? (
+          <p className={styles.empty}>Tap a product to add it.</p>
+        ) : (
+          <button
+            type="button"
+            className={styles.cartSummary}
+            aria-expanded={cartOpen}
+            onClick={() => setCartOpen((open) => !open)}
+            disabled={thinking}
+          >
+            <span>
+              {count} item{count === 1 ? "" : "s"} · {money(total)}
+              {missing.size > 0 ? " · needs temp" : ""}
+            </span>
+            <span className={styles.cartChevron} aria-hidden>
+              {cartOpen ? "▾" : "▸"}
+            </span>
+          </button>
+        )}
+        {cartOpen && session.lines.length > 0 ? (
+          <div className={styles.lines}>
+            {session.lines.map((line) => {
+              const product = getItem(line.productId);
+              const unit = product?.priceCents ?? 0;
+              return (
+                <div key={line.lineId} className={styles.line}>
+                  <strong>
+                    {product?.name ?? line.productId}
+                    {line.quantity > 1 ? ` × ${line.quantity}` : ""}
+                  </strong>
+                  <span className={styles.price}>{money(unit * line.quantity)}</span>
+                  {line.temperature ? (
+                    <button
+                      type="button"
+                      className={styles.meta}
+                      onClick={() => onEditTemp(line.lineId, line.productId)}
+                      disabled={thinking}
+                    >
+                      {TEMPS.find((temp) => temp.id === line.temperature)?.label}
+                    </button>
+                  ) : null}
+                  {missing.has(line.lineId) ? (
+                    <div className={styles.tempPick} role="group" aria-label={`Temperature for ${product?.name ?? "drink"}`}>
+                      {TEMPS.map((temp) => (
+                        <button
+                          key={temp.id}
+                          type="button"
+                          onClick={() => onSetTemp(line.lineId, temp.id)}
+                          disabled={thinking}
+                        >
+                          {temp.label}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  <div className={styles.qty}>
+                    <button
+                      type="button"
+                      aria-label={`Decrease ${product?.name ?? "item"}`}
+                      onClick={() => onQuantity(line.lineId, line.quantity - 1)}
+                      disabled={thinking || line.quantity <= 1}
+                    >
+                      −
+                    </button>
+                    <span>{line.quantity}</span>
+                    <button
+                      type="button"
+                      aria-label={`Increase ${product?.name ?? "item"}`}
+                      onClick={() => onQuantity(line.lineId, line.quantity + 1)}
+                      disabled={thinking || line.quantity >= 9}
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.remove}
+                      onClick={() => onRemove(line.lineId)}
+                      disabled={thinking}
+                    >
+                      Remove
+                    </button>
                   </div>
-                ) : null}
-                <div className={styles.qty}>
-                  <button
-                    type="button"
-                    aria-label={`Decrease ${product?.name ?? "item"}`}
-                    onClick={() => onQuantity(line.lineId, line.quantity - 1)}
-                    disabled={line.quantity <= 1}
-                  >
-                    −
-                  </button>
-                  <span>{line.quantity}</span>
-                  <button
-                    type="button"
-                    aria-label={`Increase ${product?.name ?? "item"}`}
-                    onClick={() => onQuantity(line.lineId, line.quantity + 1)}
-                    disabled={line.quantity >= 9}
-                  >
-                    +
-                  </button>
-                  <button type="button" className={styles.remove} onClick={() => onRemove(line.lineId)}>
-                    Remove
-                  </button>
                 </div>
-              </div>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        ) : null}
         {notice ? (
-          <p className={styles.notice} role="status">
+          <p className={networkFail ? `${styles.notice} ${styles.noticeFail}` : styles.notice} role="status">
             {notice}
           </p>
         ) : null}
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
-        <Composer onSend={onSend} />
-        <button type="button" className={styles.primary} onClick={onReview} disabled={count === 0 || missing.size > 0}>
-          {count === 0 ? "Review order" : `Review order · ${money(cartTotal(session))}`}
+        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact />
+        {typeOpen ? (
+          <Composer onSend={onSend} disabled={thinking} onClose={() => setTypeOpen(false)} />
+        ) : (
+          <button
+            type="button"
+            className={styles.typeInstead}
+            onClick={() => setTypeOpen(true)}
+            disabled={thinking}
+          >
+            Type instead
+          </button>
+        )}
+        <button
+          type="button"
+          className={styles.primary}
+          onClick={onReview}
+          disabled={thinking || count === 0 || missing.size > 0}
+        >
+          {count === 0 ? "Review order" : `Review order · ${money(total)}`}
         </button>
       </footer>
     </>
@@ -609,12 +865,14 @@ function ProductSheet({
   item,
   lineId,
   session,
+  busy,
   onClose,
   onAdd,
 }: {
   item: CatalogItem;
   lineId?: string;
   session: OrderSession;
+  busy: boolean;
   onClose: () => void;
   onAdd: (temperature?: Temperature) => void;
 }) {
@@ -624,7 +882,7 @@ function ProductSheet({
   const blocked = needsTemp && !temperature;
 
   return (
-    <div className={styles.backdrop} onClick={onClose}>
+    <div className={styles.backdrop} onClick={busy ? undefined : onClose}>
       <div
         className={styles.sheet}
         role="dialog"
@@ -644,6 +902,7 @@ function ProductSheet({
                 className={temperature === temp.id ? `${styles.temp} ${styles.tempOn}` : styles.temp}
                 aria-pressed={temperature === temp.id}
                 onClick={() => setTemperature(temp.id)}
+                disabled={busy}
               >
                 <strong>{temp.label}</strong>
                 <small>{temp.hint}</small>
@@ -651,10 +910,15 @@ function ProductSheet({
             ))}
           </div>
         ) : null}
-        <button type="button" className={styles.primary} disabled={blocked} onClick={() => onAdd(temperature)}>
+        <button
+          type="button"
+          className={styles.primary}
+          disabled={busy || blocked}
+          onClick={() => onAdd(temperature)}
+        >
           {lineId ? "Save temperature" : `Add to order · ${money(item.priceCents)}`}
         </button>
-        <button type="button" className={styles.ghost} onClick={onClose}>
+        <button type="button" className={styles.ghost} onClick={onClose} disabled={busy}>
           Close
         </button>
       </div>
@@ -673,6 +937,7 @@ function Review({
   onSend,
   onConfirm,
   onChange,
+  thinking,
 }: {
   readBack: ReadBack;
   notice: string | null;
@@ -684,7 +949,9 @@ function Review({
   onSend: (text: string) => void;
   onConfirm: () => void;
   onChange: () => void;
+  thinking: boolean;
 }) {
+  const networkFail = notice?.includes("Couldn't reach the machine");
   return (
     <div className={styles.review}>
       <div>
@@ -714,16 +981,16 @@ function Review({
       </div>
       <div className={styles.stack}>
         {notice ? (
-          <p className={styles.notice} role="status">
+          <p className={networkFail ? `${styles.notice} ${styles.noticeFail}` : styles.notice} role="status">
             {notice}
           </p>
         ) : null}
         <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
-        <Composer onSend={onSend} />
-        <button type="button" className={styles.primary} onClick={onConfirm}>
+        <Composer onSend={onSend} disabled={thinking} modest />
+        <button type="button" className={styles.primary} onClick={onConfirm} disabled={thinking}>
           Confirm order
         </button>
-        <button type="button" className={styles.ghost} onClick={onChange}>
+        <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
           Change order
         </button>
       </div>
@@ -741,6 +1008,7 @@ function Pay({
   onSend,
   onChange,
   onNew,
+  thinking,
 }: {
   readBack: ReadBack;
   say: string | null;
@@ -751,6 +1019,7 @@ function Pay({
   onSend: (text: string) => void;
   onChange: () => void;
   onNew: () => void;
+  thinking: boolean;
 }) {
   return (
     <div className={styles.pay}>
@@ -775,11 +1044,11 @@ function Pay({
       </div>
       <div className={styles.stack}>
         <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
-        <Composer onSend={onSend} />
-        <button type="button" className={styles.ghost} onClick={onChange}>
+        <Composer onSend={onSend} disabled={thinking} modest />
+        <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
           Change order
         </button>
-        <button type="button" className={styles.primary} onClick={onNew}>
+        <button type="button" className={styles.primary} onClick={onNew} disabled={thinking}>
           New order
         </button>
       </div>
@@ -802,9 +1071,10 @@ type TalkPhase = "off" | "listening" | "thinking";
 function useConversation(opts: {
   enabled: boolean;
   onClip: (clip: { blob: Blob; seconds: number }) => Promise<unknown>;
-  onArm: () => void;
+  onArm: () => AudioContext;
   onStop: () => void;
   onMiss: (text: string) => void;
+  onSilent: () => void;
   isSpeaking: () => boolean;
 }) {
   const optsRef = useRef(opts);
@@ -825,48 +1095,51 @@ function useConversation(opts: {
     optsRef.current.onStop();
   }
 
-  async function loop() {
-    optsRef.current.onArm();
-    let stream: MediaStream;
+  async function openMic(): Promise<MediaStream | null> {
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true },
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
       });
+      if (!live.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return null;
+      }
+      streamRef.current = stream;
+      return stream;
     } catch {
       live.current = false;
       setPhase("off");
       optsRef.current.onMiss("The microphone is blocked. Allow it and tap Talk again.");
-      return;
+      return null;
     }
-    if (!live.current) {
-      stream.getTracks().forEach((track) => track.stop());
-      return;
-    }
-    streamRef.current = stream;
+  }
+
+  function releaseMic(stream: MediaStream | null) {
+    stream?.getTracks().forEach((track) => track.stop());
+    if (stream && streamRef.current === stream) streamRef.current = null;
+  }
+
+  async function loop() {
+    const meter = optsRef.current.onArm();
     while (live.current) {
+      const stream = await openMic();
+      if (!stream) return;
       setPhase("listening");
-      const blob = await captureUtterance(stream, () => live.current);
+      const blob = await captureUtterance(stream, () => live.current, meter);
+      releaseMic(stream);
       if (!live.current) break;
-      if (!blob) continue;
+      if (!blob) {
+        optsRef.current.onSilent();
+        continue;
+      }
       setPhase("thinking");
       await optsRef.current.onClip(blob);
       while (live.current && optsRef.current.isSpeaking()) {
         await wait(80);
       }
+      if (live.current) await wait(400);
     }
-    stream.getTracks().forEach((track) => track.stop());
-    if (streamRef.current === stream) streamRef.current = null;
     if (!live.current) setPhase("off");
-  }
-
-  function toggle() {
-    if (live.current) {
-      end();
-      return;
-    }
-    live.current = true;
-    setPhase("listening");
-    void loop();
   }
 
   useEffect(() => {
@@ -880,20 +1153,103 @@ function useConversation(opts: {
     };
   }, []);
 
-  return { phase, toggle };
+  function start() {
+    if (live.current) return;
+    live.current = true;
+    setPhase("listening");
+    void loop();
+  }
+
+  function stop() {
+    if (!live.current) return;
+    end();
+  }
+
+  function toggle() {
+    if (live.current) stop();
+    else start();
+  }
+
+  return { phase, toggle, start, stop };
 }
 
-function Talk({ phase, speaking, onToggle }: { phase: TalkPhase; speaking: boolean; onToggle: () => void }) {
+function Talk({
+  phase,
+  speaking,
+  onToggle,
+  hero,
+  compact,
+  circle,
+  mic,
+  startLabel,
+}: {
+  phase: TalkPhase;
+  speaking: boolean;
+  onToggle: () => void;
+  hero?: boolean;
+  compact?: boolean;
+  circle?: boolean;
+  mic?: boolean;
+  startLabel?: string;
+}) {
   const live = phase !== "off";
-  const label = !live ? "Talk" : speaking ? "Speaking… tap to end" : phase === "thinking" ? "One moment… tap to end" : "Listening… tap to end";
+  const mode = !live ? "off" : speaking ? "speaking" : phase === "thinking" ? "thinking" : "listening";
+  const idle = startLabel ?? "Talk";
+  const label =
+    mode === "off"
+      ? idle
+      : mode === "speaking"
+        ? circle || mic
+          ? "Speaking…"
+          : "Speaking… tap to end"
+        : mode === "thinking"
+          ? circle || mic
+            ? "Thinking…"
+            : "Thinking… tap to end"
+          : circle || mic
+            ? "Listening…"
+            : "Listening… tap to end";
+  const className = [
+    styles.talk,
+    hero ? styles.talkHero : "",
+    compact ? styles.talkCompact : "",
+    circle ? styles.talkCircle : "",
+    mic ? styles.talkMic : "",
+    mode === "listening" ? styles.talkListening : "",
+    mode === "thinking" ? styles.talkThinking : "",
+    mode === "speaking" ? styles.talkSpeaking : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
     <button
       type="button"
-      className={live ? `${styles.talk} ${styles.talkLive}` : styles.talk}
+      className={className}
       aria-pressed={live}
+      aria-label={mic ? label : undefined}
+      data-talk-state={mode}
       onClick={onToggle}
     >
-      {label}
+      {mic ? (
+        <span className={styles.micIcon} aria-hidden>
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <path
+              d="M12 3a3.5 3.5 0 0 0-3.5 3.5v5a3.5 3.5 0 1 0 7 0v-5A3.5 3.5 0 0 0 12 3Z"
+              fill="currentColor"
+            />
+            <path
+              d="M7 11.5a5 5 0 0 0 10 0M12 16.5V20"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+            />
+          </svg>
+        </span>
+      ) : (
+        <span className={styles.talkDot} aria-hidden />
+      )}
+      {mic ? <span className={styles.srOnly}>{label}</span> : label}
     </button>
   );
 }
@@ -903,14 +1259,18 @@ function wait(ms: number) {
 }
 
 /** Record until the customer pauses. Returns null when the pause had no speech. */
-function captureUtterance(stream: MediaStream, live: () => boolean): Promise<{ blob: Blob; seconds: number } | null> {
+function captureUtterance(
+  stream: MediaStream,
+  live: () => boolean,
+  context: AudioContext,
+): Promise<{ blob: Blob; seconds: number } | null> {
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
   const chunks: Blob[] = [];
   recorder.ondataavailable = (event) => {
     if (event.data.size > 0) chunks.push(event.data);
   };
-  const context = new AudioContext();
+  void context.resume();
   const source = context.createMediaStreamSource(stream);
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
@@ -943,16 +1303,16 @@ function captureUtterance(stream: MediaStream, live: () => boolean): Promise<{ b
       const spoke = heardAt !== null && now - heardAt > 280;
       const paused = spoke && now - lastVoice > 800;
       const tooLong = spoke && now - started > 12_000;
-      if (paused || tooLong) {
+      const nobody = heardAt === null && now - started > 6_000;
+      if (paused || tooLong || nobody) {
         window.clearInterval(timer);
-        finish(true);
+        finish(!nobody);
       }
     }, 50);
 
     function finish(send: boolean) {
       const done = () => {
         source.disconnect();
-        void context.close();
         const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
         const seconds = (Date.now() - started) / 1000;
         resolve(send && blob.size >= 500 ? { blob, seconds } : null);
@@ -967,28 +1327,44 @@ function captureUtterance(stream: MediaStream, live: () => boolean): Promise<{ b
   });
 }
 
-function Composer({ onSend }: { onSend: (text: string) => void }) {
+function Composer({
+  onSend,
+  disabled,
+  modest,
+  onClose,
+}: {
+  onSend: (text: string) => void;
+  disabled?: boolean;
+  modest?: boolean;
+  onClose?: () => void;
+}) {
   const [text, setText] = useState("");
   return (
     <form
-      className={styles.composer}
+      className={modest ? `${styles.composer} ${styles.composerModest}` : styles.composer}
       onSubmit={(event) => {
         event.preventDefault();
         const value = text.trim();
-        if (!value) return;
+        if (!value || disabled) return;
         setText("");
         onSend(value);
       }}
     >
       <input
         aria-label="Type your order"
-        placeholder="Type your order"
+        placeholder={modest ? "Or type here" : "Type your order"}
         value={text}
+        disabled={disabled}
         onChange={(event) => setText(event.target.value)}
       />
-      <button type="submit" className={styles.send}>
+      <button type="submit" className={styles.send} disabled={disabled}>
         Send
       </button>
+      {onClose ? (
+        <button type="button" className={styles.composerClose} onClick={onClose} aria-label="Hide typing">
+          ✕
+        </button>
+      ) : null}
     </form>
   );
 }

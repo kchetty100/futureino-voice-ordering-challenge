@@ -14,6 +14,7 @@ import {
   type ReadBack,
   type RejectReason,
 } from "../order/engine";
+import { clearNoCue, clearYesCue, langOf, noMoreCue, t, tempLabel } from "../i18n";
 
 export const AGENT_TOOLS = ["search_menu", "add_to_cart", "set_temperature", "remove_line", "read_back"] as const;
 export type AgentToolName = (typeof AGENT_TOOLS)[number];
@@ -26,19 +27,9 @@ export type ToolEffect = {
   ok: boolean;
 };
 
-const REASONS: Record<RejectReason, string> = {
-  session_abandoned: "This order was cleared.",
-  unknown_product: "That item is not on this machine.",
-  wrong_machine: "That item is not on this machine.",
-  invalid_quantity: "I can add between 1 and 9.",
-  invalid_temperature: "Choose hot, iced, or room.",
-  temperature_not_allowed: "Snacks do not take a temperature.",
-  unknown_line: "That line is no longer in the cart.",
-  cart_empty: "There is nothing in the cart yet.",
-  incomplete: "Choose hot, iced, or room before I can confirm.",
-  not_awaiting_confirmation: "I need to read the order back before a yes counts.",
-  stale_cart: "That order changed. Ask me to read it again.",
-};
+function reasonSay(session: OrderSession, reason: RejectReason): string {
+  return t(langOf(session), reason);
+}
 
 export function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
@@ -73,18 +64,20 @@ export function runTool(
 ): ToolEffect {
   if (!isAgentTool(name)) {
     const stayed = apply(session, { type: "activity", now });
-    return effect(stayed, "I can only search this machine, add a menu item, or read the order back.", [], false);
+    return effect(stayed, t(langOf(session), "only_menu_tools"), [], false);
   }
   if (name === "search_menu") {
     const stayed = apply(session, { type: "activity", now });
     const hits = searchCatalog(String(args.query ?? ""));
     const say =
       hits.length === 0
-        ? "This machine doesn't carry that."
-        : `I can offer ${hits
-            .slice(0, 3)
-            .map((item) => item.name)
-            .join(", ")}.`;
+        ? t(langOf(session), "not_carried")
+        : t(langOf(session), "can_offer", {
+            names: hits
+              .slice(0, 3)
+              .map((item) => item.name)
+              .join(", "),
+          });
     return effect(stayed, say, hits.map((item) => item.id), hits.length > 0);
   }
   if (name === "add_to_cart") {
@@ -104,7 +97,7 @@ export function runTool(
     const temperature = args.temperature;
     if (!isTemperature(temperature)) {
       const stayed = apply(session, { type: "activity", now });
-      return effect(stayed, "Choose hot, iced, or room.", [], false);
+      return effect(stayed, t(langOf(session), "choose_temp"), [], false);
     }
     const result = apply(session, {
       type: "set_temperature",
@@ -112,19 +105,19 @@ export function runTool(
       temperature,
       now,
     });
-    return effect(result, result.ok ? sayForTemperature(result.session, String(args.lineId)) : REASONS[result.reason ?? "unknown_line"], []);
+    return effect(result, result.ok ? sayForTemperature(result.session, String(args.lineId)) : reasonSay(result.session, result.reason ?? "unknown_line"), []);
   }
   if (name === "remove_line") {
     const result = apply(session, { type: "remove_line", lineId: String(args.lineId ?? ""), now });
-    return effect(result, result.ok ? "Removed." : REASONS[result.reason ?? "unknown_line"], []);
+    return effect(result, result.ok ? t(langOf(result.session), "removed") : reasonSay(result.session, result.reason ?? "unknown_line"), []);
   }
   const result = apply(session, { type: "read_back", now });
-  return effect(result, result.ok && result.readBack ? sayForReadBack(result.readBack) : REASONS[result.reason ?? "incomplete"], []);
+  return effect(result, result.ok && result.readBack ? sayForReadBack(result.session, result.readBack) : reasonSay(result.session, result.reason ?? "incomplete"), []);
 }
 
 export function isClearYes(text: string): boolean {
   const normalized = spokenWords(text);
-  if (YES.has(normalized)) return true;
+  if (YES.has(normalized) || clearYesCue(normalized)) return true;
   if (changesOrder(normalized)) return false;
   const content = normalized.split(" ").filter((token) => token && !YES_FILLER.has(token));
   if (content.length > 0 && content.every((token) => YES_WORD.has(token))) return true;
@@ -133,24 +126,28 @@ export function isClearYes(text: string): boolean {
 
 /** A reply that accepts the order and also changes it is not a confirmation. */
 export function changesOrder(text: string): boolean {
-  return /\b(but|except|change|make|add|remove|without|instead|another|also|too|hot|iced|ice|cold|room|no|not)\b/.test(spokenWords(text));
+  return /\b(but|except|change|make|add|remove|removed|delete|deleted|without|instead|another|also|too|hot|iced|ice|cold|room|no|not)\b/.test(spokenWords(text))
+    || /\btake\b.*\b(off|out|away)\b/.test(spokenWords(text))
+    || /\bget\b.*\brid\b/.test(spokenWords(text));
 }
 
 export function isClearNo(text: string): boolean {
   const normalized = spokenWords(text);
-  return ["no", "nope", "nah", "change it", "change", "no thanks", "no thank you"].includes(normalized);
+  return ["no", "nope", "nah", "change it", "change", "no thanks", "no thank you"].includes(normalized) || clearNoCue(normalized);
 }
 
 /** They do not want another item. "No, make it hot" is a change, not this. */
 export function wantsNoMore(text: string): boolean {
   const normalized = spokenWords(text);
-  if (NO_MORE.has(normalized)) return true;
+  if (NO_MORE.has(normalized) || noMoreCue(normalized)) return true;
   return /^(no|nope|nah|nothing)( thanks| thank you| more| else)?$/.test(normalized);
 }
 
 /** The reply asks to change the order, not merely to stop adding. */
 export function wantsChange(text: string): boolean {
-  return /\b(change|make|add|remove|but|instead|hot|iced|ice|cold|room|not)\b/.test(spokenWords(text));
+  return /\b(change|make|add|remove|removed|delete|deleted|but|instead|hot|iced|ice|cold|room|not)\b/.test(spokenWords(text))
+    || /\btake\b.*\b(off|out|away)\b/.test(spokenWords(text))
+    || /\bget\b.*\brid\b/.test(spokenWords(text));
 }
 
 function spokenWords(text: string): string {
@@ -158,17 +155,22 @@ function spokenWords(text: string): string {
     .trim()
     .toLowerCase()
     .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 export function asksAllergens(text: string): boolean {
   const normalized = text.toLowerCase();
-  if (/\b(allergen|allergens|allergy|allergic)\b/.test(normalized)) return true;
+  if (
+    /\b(allergen|allergens|allergy|allergic|al[eé]rgeno[s]?|allerg[eè]ne[s]?|אלרגן|allergeen)\b/i.test(normalized) ||
+    /אלרג/.test(text)
+  ) {
+    return true;
+  }
   return (
-    /\b(contain|contains|safe)\b/.test(normalized) &&
-    /\b(nut|nuts|dairy|gluten|milk|peanut|peanuts)\b/.test(normalized)
+    /\b(contain|contains|safe|contiene|contient|bevat|tiene)\b/i.test(normalized) &&
+    /\b(nut|nuts|dairy|gluten|milk|peanut|peanuts|nueces|cacahuete|lait|glúten|al[eé]rgeno[s]?)\b/i.test(normalized)
   );
 }
 
@@ -186,25 +188,24 @@ function effect(result: ApplyResult, say: string, spotlightIds: string[], ok = r
 }
 
 function sayForAdd(result: ApplyResult, productId: string, temperature?: Temperature): string {
-  if (!result.ok) return REASONS[result.reason ?? "unknown_product"];
+  if (!result.ok) return reasonSay(result.session, result.reason ?? "unknown_product");
   const line =
     result.session.lines.find((candidate) => candidate.productId === productId && candidate.temperature === temperature) ??
     result.session.lines[result.session.lines.length - 1];
   const item = line ? getItem(line.productId) : undefined;
-  const name = item?.name ?? "That item";
-  if (result.missing.length > 0) return `${name} is in the cart. Hot, iced, or room?`;
-  const temp = line?.temperature ? `${line.temperature} ` : "";
-  return `Added ${temp}${name}.`;
+  const name = item?.name ?? t(langOf(result.session), "that_item");
+  if (result.missing.length > 0) return t(langOf(result.session), "added_need_temp", { name });
+  return t(langOf(result.session), "added", { temp: tempLabel(line?.temperature), name });
 }
 
 function sayForTemperature(session: OrderSession, lineId: string): string {
   const line = session.lines.find((candidate) => candidate.lineId === lineId) ?? session.lines[0];
   const item = line ? getItem(line.productId) : undefined;
-  if (!line?.temperature || !item) return "Temperature saved.";
+  if (!line?.temperature || !item) return t(langOf(session), "temp_saved");
   return `${item.name}, ${line.temperature}.`;
 }
 
-function sayForReadBack(readBack: ReadBack): string {
+function sayForReadBack(session: OrderSession, readBack: ReadBack): string {
   const lines = readBack.lines
     .map((line) => {
       const temp = line.temperature ? `${line.temperature} ` : "";
@@ -212,7 +213,7 @@ function sayForReadBack(readBack: ReadBack): string {
       return `${temp}${line.name}${qty}`;
     })
     .join(", ");
-  return `That's ${lines}. Total ${money(readBack.totalCents)}. Would you like to add anything else, or say yes to confirm the order?`;
+  return t(langOf(session), "read_back", { lines, total: money(readBack.totalCents) });
 }
 
 function scoreItem(item: CatalogItem, query: string, tokens: string[]): number {

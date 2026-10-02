@@ -2,6 +2,7 @@ import { aliasesFor, CATALOG, getItem, type MachineId, type Temperature } from "
 import { chatUsage } from "../operator/cost";
 import { noteUsage } from "../operator/log";
 import { apply, type OrderSession } from "../order/engine";
+import { langOf } from "../i18n";
 import { machineIntro } from "./arrive";
 import { finishIfComplete, type TurnResult } from "./rules";
 import { runTool, type ToolEffect } from "./tools";
@@ -53,7 +54,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
   if (heard.action === "none") return null;
   if (heard.action === "menu" && heard.menu) {
     const opening = heard.menu !== session.machineId;
-    const intro = machineIntro(heard.menu);
+    const intro = machineIntro(heard.menu, langOf(session));
     const stayed =
       opening && (session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay")
         ? apply(session, { type: "revise", now })
@@ -64,6 +65,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
       spotlightIds: intro.spotlightIds,
       readBack: null,
       switchTo: opening ? heard.menu : null,
+      ui: null,
     };
   }
   if (heard.action === "clarify") {
@@ -85,6 +87,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
       spotlightIds: shown.map((item) => item.id),
       readBack: null,
       switchTo: null,
+      ui: null,
     };
   }
   if (heard.action !== "add" || heard.lines.length === 0) return null;
@@ -103,7 +106,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
       now,
     );
     if (!added.ok) {
-      return { session: added.session, say: added.say, spotlightIds: [], readBack: null, switchTo: null };
+      return { session: added.session, say: added.say, spotlightIds: [], readBack: null, switchTo: null, ui: null };
     }
     current = added.session;
     last = added;

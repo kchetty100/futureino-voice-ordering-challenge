@@ -78,5 +78,5 @@ export function speechPrompt(): string {
     const extra = aliasesFor(item.id);
     return extra.length > 0 ? `${item.name} (${extra.join(", ")})` : item.name;
   });
-  return `What snacks do you have? Snacks Bot. Boost Coffee. ${parts.join("; ")}.`;
+  return `What snacks do you have? Snacks Bot. Boost Coffee. ${parts.join("; ")}. Hey Future.`;
 }

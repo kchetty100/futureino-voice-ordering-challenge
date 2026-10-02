@@ -1,6 +1,6 @@
 import type { OrderSession } from "../order/engine";
 import { classifyConfirmation } from "./confirm";
-import { acceptOrder, answerWithRules, declineOrder, type TurnResult } from "./rules";
+import { acceptOrder, answerWithRules, declineOrder, isCartEditUtterance, type TurnResult } from "./rules";
 import { changesOrder, wantsChange } from "./tools";
 import { applyHeard, understandUtterance } from "./understand";
 
@@ -10,7 +10,9 @@ import { applyHeard, understandUtterance } from "./understand";
  */
 export async function takeTurn(session: OrderSession, text: string, now: number): Promise<TurnResult> {
   const ruled = answerWithRules(session, text, now);
-  if (ruled.switchTo || orderMoved(session, ruled.session)) return ruled;
+  if (ruled.switchTo || ruled.ui || orderMoved(session, ruled.session)) return ruled;
+  // Named remove/quantity/heat stays with the rule reply. Do not revise to a vague "what do you want to change?"
+  if (isCartEditUtterance(text)) return ruled;
 
   const waiting = session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay";
   if (process.env.OPENAI_API_KEY && waiting) {

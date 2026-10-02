@@ -1,6 +1,7 @@
 import { speechPrompt } from "../../../../../catalog/index";
+import { langOf, languageFromSttLabel, t } from "../../../../../i18n";
 import { loadRecord, noteUsageFor, recordTurn, saveRecord } from "../../../../../operator/log";
-import { commandSession, messageSession, sessionMachine } from "../../../../../session/store";
+import { commandSession, messageSession, recallLanguage, sessionMachine } from "../../../../../session/store";
 import { lineToSpeak } from "../../../../../speech/line";
 import { synthesize, transcribe } from "../../../../../speech/openai";
 
@@ -23,13 +24,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
   if (!(await sessionMachine(id))) return Response.json({ error: "Unknown session." }, { status: 404 });
   const prompt = speechPrompt();
+  const knownLanguage = await recallLanguage(id);
 
   let transcript = "";
   let usage: Awaited<ReturnType<typeof transcribe>>["usage"] | null = null;
+  let sttLanguageLabel: string | null = null;
   try {
-    const heard = await transcribe(audio, prompt, clipSeconds(form));
+    const heard = await transcribe(audio, prompt, clipSeconds(form), knownLanguage?.languageSet ? knownLanguage.preferredLanguage : null);
     transcript = heard.text === prompt ? "" : heard.text;
     usage = heard.usage;
+    sttLanguageLabel = heard.detectedLanguage;
   } catch (error) {
     console.error("Transcription failed.", error instanceof Error ? error.message : "unknown error");
     return Response.json({ error: "Speech didn't come through." }, { status: 502 });
@@ -38,22 +42,25 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   await loadRecord(id);
   noteUsageFor(id, usage);
   if (!transcript) {
-    recordTurn(id, { at: Date.now(), source: "voice", customer: null, say: "I didn't catch that." });
+    const lang = knownLanguage?.preferredLanguage ?? languageFromSttLabel(sttLanguageLabel) ?? "en";
+    const miss = t(lang, "didnt_catch");
+    recordTurn(id, { at: Date.now(), source: "voice", customer: null, say: miss });
     await saveRecord(id);
     const quiet = await commandSession(id, { type: "activity" });
     if (!quiet) return Response.json({ error: "Unknown session." }, { status: 404 });
-    return Response.json({ ...quiet, say: "I didn't catch that.", transcript: "", audioBase64: null });
+    return Response.json({ ...quiet, say: miss, transcript: "", audioBase64: null });
   }
 
   await saveRecord(id);
-  const response = await messageSession(id, transcript, Date.now(), "voice");
+  const response = await messageSession(id, transcript, Date.now(), "voice", sttLanguageLabel);
   if (!response) return Response.json({ error: "Unknown session." }, { status: 404 });
 
   let audioBase64: string | null = null;
   const line = lineToSpeak(response.say);
   if (line) {
     try {
-      const spoken = await synthesize(line);
+      const speakLang = response.session ? langOf(response.session) : knownLanguage?.preferredLanguage;
+      const spoken = await synthesize(line, speakLang);
       if (spoken) {
         noteUsageFor(id, spoken.usage);
         await saveRecord(id);

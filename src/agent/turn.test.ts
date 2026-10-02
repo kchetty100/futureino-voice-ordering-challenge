@@ -265,6 +265,7 @@ describe("text agent", () => {
       spotlightIds: added.spotlightIds,
       readBack: added.readBack,
       switchTo: null,
+      ui: null,
     });
     assert.equal(chosen.session.lines.length, 0);
     assert.match(chosen.say, /Potato Chips/);
@@ -275,5 +276,57 @@ describe("text agent", () => {
     assert.equal(effect.ok, false);
     assert.equal(effect.session.lines.length, 0);
     assert.equal(effect.say, "That item is not on this machine.");
+  });
+
+  it("adds an iced americano beside a hot one instead of bumping hot quantity", () => {
+    const drafted = answerWithRules(coffee(), "hot americano", 1);
+    assert.equal(drafted.session.lines.length, 1);
+    assert.equal(drafted.session.lines[0]?.productId, "coffee-01");
+    assert.equal(drafted.session.lines[0]?.temperature, "hot");
+    assert.equal(drafted.session.lines[0]?.quantity, 1);
+
+    for (const phrase of ["add another iced americano", "one more cold americano"]) {
+      const turn = answerWithRules(drafted.session, phrase, 2);
+      assert.equal(turn.session.lines.length, 2, phrase);
+      const hot = turn.session.lines.find((line) => line.temperature === "hot");
+      const iced = turn.session.lines.find((line) => line.temperature === "iced");
+      assert.equal(hot?.productId, "coffee-01", phrase);
+      assert.equal(hot?.quantity, 1, phrase);
+      assert.equal(iced?.productId, "coffee-01", phrase);
+      assert.equal(iced?.quantity, 1, phrase);
+      assert.equal(turn.session.phase, "awaiting_confirmation", phrase);
+      assert.ok(turn.readBack, phrase);
+    }
+  });
+
+  it("removes a named drink with or without the, and with iced or hot in the name", () => {
+    const drafted = answerWithRules(coffee(), "iced spiced chai and iced latte", 1);
+    assert.equal(drafted.session.lines.length, 2);
+
+    for (const phrase of [
+      "Remove Spiced Iced Chai.",
+      "remove the spiced iced chai",
+      "remove spiced chai",
+      "delete the spiced iced chai",
+      "take off the spiced iced chai",
+      "take the spiced iced chai off",
+      "get rid of the spiced iced chai",
+    ]) {
+      const turn = answerWithRules(drafted.session, phrase, 2);
+      assert.equal(turn.session.lines.length, 1, phrase);
+      assert.equal(turn.session.lines[0]?.productId, "coffee-04", phrase);
+      assert.equal(turn.session.phase, "awaiting_confirmation", phrase);
+      assert.match(turn.say, /Removed Spiced Chai/, phrase);
+      assert.doesNotMatch(turn.say, /What do you want to change/, phrase);
+      assert.doesNotMatch(turn.say, /What else would you like/, phrase);
+    }
+
+    // Spoken "iced" in the name still removes the only Spiced Chai when that line is hot.
+    const hot = answerWithRules(coffee(), "hot spiced chai and potato chips", 1);
+    const rem = answerWithRules(hot.session, "remove spiced iced chai", 2);
+    assert.equal(rem.session.lines.length, 1);
+    assert.equal(rem.session.lines[0]?.productId, "snacks-19");
+    assert.match(rem.say, /Removed Spiced Chai/);
+    assert.doesNotMatch(rem.say, /What do you want to change/);
   });
 });
