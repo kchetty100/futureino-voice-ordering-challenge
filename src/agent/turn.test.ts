@@ -327,6 +327,18 @@ describe("text agent", () => {
     assert.equal(ice.session.lines[0]?.temperature, "iced");
     assert.equal(ice.session.phase, "awaiting_confirmation");
 
+    const hod = answerWithRules(asked.session, "hod", 7);
+    assert.equal(hod.session.lines[0]?.temperature, "hot");
+    const cod = answerWithRules(asked.session, "cod", 8);
+    assert.equal(cod.session.lines[0]?.temperature, "iced");
+    const hat = answerWithRules(asked.session, "hat", 9);
+    assert.equal(hat.session.lines[0]?.temperature, undefined);
+    const could = answerWithRules(asked.session, "could", 10);
+    assert.equal(could.session.lines[0]?.temperature, undefined);
+    const named = answerWithRules(coffee(), "hod latte", 11);
+    assert.equal(named.session.lines[0]?.productId, "coffee-04");
+    assert.equal(named.session.lines[0]?.temperature, "hot");
+
     const again = answerWithRules(asked.session, "latte", 5);
     assert.equal(again.session.lines.length, 1);
     assert.equal(again.session.lines[0]?.quantity, 1);

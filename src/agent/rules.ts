@@ -3,6 +3,7 @@ import { applyLanguageCue, langOf, t, temperatureFromCue } from "../i18n";
 import { apply, MAX_QUANTITY, type OrderSession, type CartLine, type ReadBack } from "../order/engine";
 import { machineIntro, requestedMachine } from "./arrive";
 import { parseNavIntent, type UiCommand } from "./nav";
+import { foldCloseTemperatures } from "../speech/near";
 import { asksAllergens, isClearNo, isClearYes, itemScore, money, namesAProduct, productMentioned, runTool, searchCatalog, wantsChange, wantsCorrection, wantsNoMore, type ToolEffect } from "./tools";
 
 export type { UiCommand };
@@ -52,6 +53,7 @@ export function declineOrder(session: OrderSession, now: number): TurnResult {
 
 /** Rule replies used in tests, and whenever no model key is configured. */
 export function answerWithRules(session: OrderSession, text: string, now: number): TurnResult {
+  text = foldCloseTemperatures(text);
   const { fields, ack } = applyLanguageCue(
     { preferredLanguage: session.preferredLanguage, languageSet: session.languageSet },
     text,

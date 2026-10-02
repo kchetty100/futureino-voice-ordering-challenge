@@ -619,3 +619,13 @@ The welcome line already on screen moves with the button too, so it does not sta
 **Why:** People near the machine talk to each other. A clip of the machine's own line was already ignored. Other mishears could still become a cart change.
 
 **How we checked:** "What time does the movie start" leaves an iced latte in place. "She was telling me the latte shop is closed" adds nothing. A model add of Latte from that movie sentence is dropped. "I'll have the mocha please" still names Mocha.
+
+## 2026-10-02 — A close miss of hot or cold still counts
+
+**Decided:** A word one letter off hot, cold, iced, ice, or room, and no longer than that word, is that temperature. "hod" is hot. "cod" is cold, which is iced. "hat", "not", and "could" stay themselves.
+
+**Alternatives:** Add hod and cod as one-off aliases. Send every temperature to the model.
+
+**Why:** Speech often drops or swaps one letter in a short word. The temperature check was looking for the exact spelling, so the drink stayed unfinished.
+
+**How we checked:** A latte waiting for a temperature accepts "hod" as hot and "cod" as iced. "hat" does not set one. "could I get a latte" does not come back iced.
