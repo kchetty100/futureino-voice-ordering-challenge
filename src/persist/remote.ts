@@ -20,6 +20,13 @@ export async function sharedSet(key: string, value: string): Promise<void> {
   await command("SET", key, value, "EX", WEEK_SECONDS);
 }
 
+/** Add one to a counter. The first hit sets the expiry so a later hit does not extend it. */
+export async function sharedIncr(key: string, ttlSeconds: number): Promise<number> {
+  const count = Number(await command<number | string>("INCR", key));
+  if (count === 1) await command("EXPIRE", key, String(ttlSeconds));
+  return count;
+}
+
 export async function sharedRemember(id: string): Promise<void> {
   await command("SADD", INDEX, id);
 }

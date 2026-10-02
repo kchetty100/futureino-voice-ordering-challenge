@@ -1,6 +1,7 @@
 import { parseNavIntent } from "../../../agent/nav";
 import { isPromptEcho, speechPrompt } from "../../../catalog/index";
 import { detectLanguage, languageFromSttLabel, t } from "../../../i18n";
+import { claimSpeech, speechBudgetDenied, speechClientIp } from "../../../operator/budget";
 import { beginLobby, noteUsageFor, recordTurn, saveRecord } from "../../../operator/log";
 import { arriveSession } from "../../../session/store";
 import { lineToSpeak } from "../../../speech/line";
@@ -19,6 +20,7 @@ export async function POST(request: Request) {
   if (contentType.includes("application/json")) {
     const body = (await request.json()) as { text?: string };
     text = body.text?.trim() ?? "";
+    if (process.env.OPENAI_API_KEY && !(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
   } else {
     if (!process.env.OPENAI_API_KEY) return Response.json({ error: "Speech is not configured." }, { status: 503 });
     const form = await request.formData();
@@ -26,6 +28,7 @@ export async function POST(request: Request) {
     const audio = form.get("audio");
     if (!(audio instanceof File) || audio.size === 0) return Response.json({ error: "No audio." }, { status: 400 });
     if (audio.size > MAX_AUDIO_BYTES) return Response.json({ error: "That recording is too long." }, { status: 413 });
+    if (!(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
     try {
       // First utterance: do not force English; let STT auto-detect.
       const heard = await transcribe(audio, PROMPT, clipSeconds(form), null);

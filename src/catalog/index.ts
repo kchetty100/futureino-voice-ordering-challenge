@@ -86,7 +86,8 @@ export function isPromptEcho(text: string, prompt = speechPrompt()): boolean {
   const heard = promptWords(text);
   const guide = promptWords(prompt);
   if (!heard || !guide) return false;
-  return guide.startsWith(heard) || heard.startsWith(guide);
+  if (guide.startsWith(heard) || heard.startsWith(guide)) return true;
+  return heard.includes("futureino menu words");
 }
 
 function promptWords(text: string): string {

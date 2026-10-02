@@ -159,6 +159,12 @@ describe("text agent", () => {
     const named = answerWithRules(snacks(), "cookies and cream bar", 3);
     assert.equal(named.session.lines.length, 1);
     assert.equal(named.session.lines[0]?.productId, "snacks-21");
+
+    const listed = answerWithRules(snacks(), "cookies and cream and potato chips and pretzels", 4);
+    assert.deepEqual(
+      listed.session.lines.map((line) => line.productId),
+      ["snacks-21", "snacks-19", "snacks-22"],
+    );
   });
 
   it("takes a temperature for each drink in an and order", () => {

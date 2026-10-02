@@ -1,5 +1,6 @@
 import { getItem, isPromptEcho, speechPrompt } from "../../../../../catalog/index";
 import { langOf, languageFromSttLabel, t } from "../../../../../i18n";
+import { claimSpeech, speechBudgetDenied, speechClientIp } from "../../../../../operator/budget";
 import { loadRecord, noteUsageFor, recordTurn, saveRecord } from "../../../../../operator/log";
 import { commandSession, messageSession, recallLanguage, sessionMachine } from "../../../../../session/store";
 import { lineToSpeak } from "../../../../../speech/line";
@@ -21,6 +22,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   if (audio.size > MAX_AUDIO_BYTES) {
     return Response.json({ error: "That recording is too long." }, { status: 413 });
   }
+  if (!(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
 
   if (!(await sessionMachine(id))) return Response.json({ error: "Unknown session." }, { status: 404 });
   const prompt = speechPrompt();

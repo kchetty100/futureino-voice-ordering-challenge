@@ -54,6 +54,7 @@ describe("customer phrases", () => {
     assert.equal(isPromptEcho("What snacks do you have?"), false);
     assert.equal(isPromptEcho("iced latte"), false);
     assert.equal(isPromptEcho("Hey Future"), false);
+    assert.equal(isPromptEcho("context: ### Futureino menu words. Americano (black coffee, long black)"), true);
   });
 
   it("adds only real menu ids from a mapped sentence", () => {

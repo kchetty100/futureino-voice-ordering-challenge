@@ -429,3 +429,33 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Alternatives:** One temperature word sets every drink. Ask "which drink?" and wait before setting any.
 
 **Why:** A temperature used to apply only when exactly one drink was waiting, so the second drink in an "and" order could not be finished by voice.
+
+## 2026-10-02 — A speech budget
+
+**Decided:** Each speech call, and each typed turn while a speech key is set, must take a slot before OpenAI is called. One address gets 120 slots an hour. The whole site gets 800 slots per UTC day. The 801st call returns 429 and the kiosk shows "The machine is resting its voice. Try again in a little while." The count lives in Redis when the shared store is configured, and in this process otherwise. The address is the platform header `x-vercel-forwarded-for` when Vercel sends it.
+
+**Alternatives:** Leave the password as the only limit. Cap dollars inside the estimator instead of counting calls. Use Vercel Firewall rules, which are a separate product.
+
+**Why:** The password keeps the public out. It does not stop a signed-in page, or a leaked password, from looping transcription. A review can still talk through an order many times. A script cannot keep going all day.
+
+**How we checked:** `src/operator/budget.test.ts`. The hour cap stops one address and still allows another. The day cap stops a fresh address. A Redis `INCR` past the hour cap is refused.
+
+## 2026-10-02 — "Cookies and cream" stays one snack inside a list
+
+**Decided:** "Cookies and cream" is a customer phrase for Cookies and Cream Bar. A name match ignores the word "and", so that phrase lines up with the alias. "Cookies and cream and potato chips and pretzels" adds three snacks: the bar, Potato Chips, and Pretzels.
+
+**Alternatives:** Stop splitting on "and" whenever the words look like a name. Ask the customer to say the full "cookies and cream bar".
+
+**Why:** Splitting on "and" turned the bar into "cookies" and "cream", neither of which was a single precise product, and the list collapsed to the last precise snack.
+
+**How we checked:** The snack list in `src/agent/turn.test.ts`. "Cookies and cream bar" on its own is still one line.
+
+## 2026-10-02 — A speech hint with a prefix is still not an order
+
+**Decided:** A transcript is dropped when it is the speech hint, or when the hint's opening "Futureino menu words" appears anywhere in it. A real "Hey Future" is kept.
+
+**Alternatives:** Drop any transcript that shares three words with the hint. Clear the transcriber prompt entirely.
+
+**Why:** A quiet clip came back as "context: ### Futureino menu words..." which does not start with the hint, so the old check let it through as "You said".
+
+**How we checked:** `isPromptEcho` in `src/agent/phrases.test.ts`.

@@ -255,7 +255,9 @@ export function nameScore(name: string, query: string): number {
   const normalized = name.toLowerCase();
   const words = normalized.split(/\s+/);
   let score = 0;
-  if (tokens.length > 0 && (tokens.join(" ") === normalized || tokens.includes(normalized) || tokens.some((token) => sameSound(token, normalized)))) {
+  const heard = tokens.join(" ");
+  const titled = words.filter((word) => word.length > 2 && !STOP.has(word)).join(" ");
+  if (tokens.length > 0 && (heard === normalized || heard === titled || tokens.includes(normalized) || tokens.some((token) => sameSound(token, normalized)))) {
     score += 10;
   }
   for (const token of tokens) {

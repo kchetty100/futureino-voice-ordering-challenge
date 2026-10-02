@@ -28,6 +28,7 @@ export const ALIASES: Record<string, readonly string[]> = {
   "snacks-10": ["tortilla chips", "nachos"],
   "snacks-17": ["jerky"],
   "snacks-19": ["yellow bag", "plain chips", "ridged chips"],
+  "snacks-21": ["cookies and cream"],
   "snacks-22": ["pretzel"],
   "snacks-26": ["cheese curls", "cheese puffs"],
   "snacks-30": ["popped corn"],
