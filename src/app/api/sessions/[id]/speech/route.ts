@@ -1,4 +1,4 @@
-import { speechPrompt } from "../../../../../catalog/index";
+import { getItem, isPromptEcho, speechPrompt } from "../../../../../catalog/index";
 import { langOf, languageFromSttLabel, t } from "../../../../../i18n";
 import { loadRecord, noteUsageFor, recordTurn, saveRecord } from "../../../../../operator/log";
 import { commandSession, messageSession, recallLanguage, sessionMachine } from "../../../../../session/store";
@@ -31,7 +31,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   let sttLanguageLabel: string | null = null;
   try {
     const heard = await transcribe(audio, prompt, clipSeconds(form), knownLanguage?.languageSet ? knownLanguage.preferredLanguage : null);
-    transcript = heard.text === prompt ? "" : heard.text;
+    transcript = isPromptEcho(heard.text, prompt) ? "" : heard.text;
     usage = heard.usage;
     sttLanguageLabel = heard.detectedLanguage;
   } catch (error) {
@@ -42,12 +42,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   await loadRecord(id);
   noteUsageFor(id, usage);
   if (!transcript) {
-    const lang = knownLanguage?.preferredLanguage ?? languageFromSttLabel(sttLanguageLabel) ?? "en";
-    const miss = t(lang, "didnt_catch");
-    recordTurn(id, { at: Date.now(), source: "voice", customer: null, say: miss });
-    await saveRecord(id);
     const quiet = await commandSession(id, { type: "activity" });
     if (!quiet) return Response.json({ error: "Unknown session." }, { status: 404 });
+    const pending =
+      quiet.session?.lines.filter(
+        (line) => getItem(line.productId)?.requiresTemperature === true && line.temperature === undefined,
+      ) ?? [];
+    const lang = quiet.session ? langOf(quiet.session) : (knownLanguage?.preferredLanguage ?? languageFromSttLabel(sttLanguageLabel) ?? "en");
+    const names = pending.map((line) => getItem(line.productId)?.name ?? "That drink");
+    const listed = names.length === 1 ? (names[0] ?? "That drink") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+    const miss =
+      names.length === 0
+        ? t(lang, "didnt_catch")
+        : t(lang, names.length === 1 ? "needs_temp" : "need_temps", { name: listed, names: listed });
+    recordTurn(id, { at: Date.now(), source: "voice", customer: null, say: miss });
+    await saveRecord(id);
     return Response.json({ ...quiet, say: miss, transcript: "", audioBase64: null });
   }
 

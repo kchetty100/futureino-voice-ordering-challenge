@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { machineForUtterance, requestedMachine } from "./arrive";
 import { answerWithRules } from "./rules";
+import { applyHeard } from "./understand";
 import { chooseTurn } from "./turn";
 import { changesOrder, isClearYes, runTool } from "./tools";
 import { createSession } from "../order/engine";
@@ -160,6 +161,66 @@ describe("text agent", () => {
     assert.equal(named.session.lines[0]?.productId, "snacks-21");
   });
 
+  it("takes a temperature for each drink in an and order", () => {
+    const both = answerWithRules(coffee(), "I want a daily black and a mocha", 1);
+    assert.equal(both.session.lines.length, 2);
+    assert.equal(both.session.lines[0]?.productId, "coffee-05");
+    assert.equal(both.session.lines[1]?.productId, "coffee-06");
+    assert.equal(both.session.lines[0]?.temperature, undefined);
+    assert.equal(both.session.lines[1]?.temperature, undefined);
+    assert.match(both.say, /Daily Black/);
+    assert.match(both.say, /Mocha/);
+    assert.match(both.say, /Hot, iced, or room/);
+
+    const first = answerWithRules(both.session, "hot", 2);
+    assert.equal(first.session.lines[0]?.temperature, "hot");
+    assert.equal(first.session.lines[1]?.temperature, undefined);
+    assert.match(first.say, /Daily Black is hot/);
+    assert.match(first.say, /Mocha still needs a temperature/);
+
+    const second = answerWithRules(first.session, "iced", 3);
+    assert.equal(second.session.lines[1]?.temperature, "iced");
+    assert.equal(second.session.phase, "awaiting_confirmation");
+
+    const together = answerWithRules(both.session, "both hot", 4);
+    assert.equal(together.session.lines[0]?.temperature, "hot");
+    assert.equal(together.session.lines[1]?.temperature, "hot");
+    assert.equal(together.session.phase, "awaiting_confirmation");
+
+    for (const phrase of ["hot for both", "cold for both", "iced for both", "room for both", "make them both hot", "for both, cold"]) {
+      const shared = answerWithRules(both.session, phrase, 7);
+      const expected = /cold|iced/.test(phrase) ? "iced" : /room/.test(phrase) ? "room" : "hot";
+      assert.equal(shared.session.lines[0]?.temperature, expected, phrase);
+      assert.equal(shared.session.lines[1]?.temperature, expected, phrase);
+      assert.equal(shared.session.lines.length, 2, phrase);
+      assert.equal(shared.session.phase, "awaiting_confirmation", phrase);
+    }
+
+    const split = answerWithRules(both.session, "hot and iced", 5);
+    assert.equal(split.session.lines[0]?.temperature, "hot");
+    assert.equal(split.session.lines[1]?.temperature, "iced");
+
+    const three = answerWithRules(coffee(), "american , mocha and capacino", 8);
+    assert.equal(three.session.lines.map((line) => line.productId).join(","), "coffee-01,coffee-06,coffee-02");
+    assert.match(three.say, /Americano, Mocha and Cocoa Cappuccino/);
+
+    const jammed = answerWithRules(coffee(), "americano mocha and cappuccino", 9);
+    assert.equal(jammed.session.lines.map((line) => line.productId).join(","), "coffee-01,coffee-06,coffee-02");
+
+    const four = answerWithRules(coffee(), "americano, mocha, cappuccino and latte", 10);
+    assert.equal(four.session.lines.length, 4);
+
+    const temps = answerWithRules(three.session, "hot, iced and room", 11);
+    assert.equal(temps.session.lines[0]?.temperature, "hot");
+    assert.equal(temps.session.lines[1]?.temperature, "iced");
+    assert.equal(temps.session.lines[2]?.temperature, "room");
+
+    const namedTemps = answerWithRules(both.session, "daily black iced and mocha hot", 6);
+    assert.equal(namedTemps.session.lines.length, 2);
+    assert.equal(namedTemps.session.lines.find((line) => line.productId === "coffee-05")?.temperature, "iced");
+    assert.equal(namedTemps.session.lines.find((line) => line.productId === "coffee-06")?.temperature, "hot");
+  });
+
   it("updates the cart from the review and stays there", () => {
     const drafted = answerWithRules(coffee(), "iced latte and potato chips", 1);
     assert.equal(drafted.session.phase, "awaiting_confirmation");
@@ -197,6 +258,15 @@ describe("text agent", () => {
     assert.equal(hotter.session.lines.find((line) => line.productId === "coffee-04")?.temperature, "hot");
     assert.equal(hotter.session.phase, "awaiting_confirmation");
     assert.ok(hotter.readBack);
+  });
+
+  it("asks for the drink that still needs a temperature after a snack is added", () => {
+    const asked = answerWithRules(coffee(), "americano", 1);
+    const turn = answerWithRules(asked.session, "potato chips", 2);
+    assert.equal(turn.session.lines.length, 2);
+    assert.match(turn.say, /Added Potato Chips/);
+    assert.match(turn.say, /Americano still needs a temperature/);
+    assert.doesNotMatch(turn.say, /Potato Chips is in the cart/);
   });
 
   it("adds a snack to the same cart as the coffee", () => {
@@ -239,6 +309,21 @@ describe("text agent", () => {
     const ice = answerWithRules(asked.session, "make it ice", 4);
     assert.equal(ice.session.lines[0]?.temperature, "iced");
     assert.equal(ice.session.phase, "awaiting_confirmation");
+
+    const again = answerWithRules(asked.session, "latte", 5);
+    assert.equal(again.session.lines.length, 1);
+    assert.equal(again.session.lines[0]?.quantity, 1);
+    assert.equal(again.session.lines[0]?.temperature, undefined);
+    assert.match(again.say, /Hot, iced, or room/);
+
+    const korean = applyHeard(
+      asked.session,
+      { action: "add", lines: [{ productId: "coffee-04", temperature: null }], choices: [], menu: null },
+      6,
+    );
+    assert.equal(korean?.session.lines.length, 1);
+    assert.equal(korean?.session.lines[0]?.quantity, 1);
+    assert.match(korean?.say ?? "", /still needs a temperature/);
   });
 
   it("says allergens are unknown and does not change the cart", () => {

@@ -1017,8 +1017,7 @@
   z-index: 2;
 }
 
-.sheet,
-.idleCard {
+.sheet {
   width: 100%;
   background: #fff;
   border-radius: 22px 22px 0 0;
@@ -1040,8 +1039,7 @@
 
 .sheet h2,
 .review h1,
-.pay h1,
-.idleCard h2 {
+.pay h1 {
   margin: 0;
   letter-spacing: -0.03em;
 }
@@ -1126,11 +1124,119 @@
   font-variant-numeric: tabular-nums;
 }
 
-.idle {
+.voiceLine {
   position: absolute;
-  inset: 0;
   z-index: 3;
-  background: rgba(18, 20, 23, 0.55);
+  top: 14px;
+  left: 14px;
+  right: 96px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 10px;
+  border-radius: 12px;
+  background: rgba(255, 252, 248, 0.9);
+  border: 1px solid rgba(23, 21, 18, 0.12);
+  pointer-events: none;
+}
+
+.voiceLine[data-hearing="true"] {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(11, 143, 190, 0.35);
+}
+
+.voiceBars {
+  flex: 1;
+  min-width: 0;
+  height: 36px;
   display: flex;
   align-items: flex-end;
+  gap: 2px;
+}
+
+.voiceBar {
+  flex: 1;
+  min-height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+
+.voiceLine[data-hearing="false"] .voiceBar {
+  background: #b7c3c8;
+}
+
+.voiceCaption {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  color: var(--muted);
+}
+
+.voiceLine[data-hearing="true"] .voiceCaption {
+  color: var(--accent);
+}
+
+.screenFace,
+.screenBlur {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.screenBlur {
+  filter: blur(14px);
+  transform: scale(1.05);
+}
+
+.leave {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  pointer-events: none;
+}
+
+.leaveRing,
+.leaveTime {
+  grid-area: 1 / 1;
+}
+
+.leaveRing {
+  width: min(220px, 52vw);
+  height: min(220px, 52vw);
+}
+
+.leaveTrack,
+.leaveProgress {
+  fill: none;
+  stroke-width: 8;
+}
+
+.leaveTrack {
+  stroke: rgba(23, 21, 18, 0.22);
+}
+
+.leaveProgress {
+  stroke: var(--accent);
+  stroke-linecap: round;
+  transform: rotate(-90deg);
+  transform-origin: center;
+  transform-box: fill-box;
+}
+
+.leaveTime {
+  margin: 0;
+  font-size: 40px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  color: var(--ink);
+  background: transparent;
 }

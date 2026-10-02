@@ -69,6 +69,7 @@ export function scrollUpCue(normalized: string): boolean {
   return (
     /\bscroll\s+up\b/.test(normalized) ||
     /^(page\s+)?up$/.test(normalized) ||
+    /^(go|move)\s+up$/.test(normalized) ||
     /\b(sube|arriba|monte|opwaarts)\b/.test(normalized) ||
     /\brol op\b/.test(normalized)
   );
@@ -78,6 +79,7 @@ export function scrollDownCue(normalized: string): boolean {
   return (
     /\bscroll\s+down\b/.test(normalized) ||
     /^(page\s+)?down$/.test(normalized) ||
+    /^(go|move)\s+down$/.test(normalized) ||
     /\b(baja|abajo|descends|afwaarts)\b/.test(normalized) ||
     /\brol af\b/.test(normalized)
   );

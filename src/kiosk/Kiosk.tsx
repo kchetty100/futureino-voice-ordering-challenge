@@ -9,16 +9,18 @@ import {
   type MachineId,
   type Temperature,
 } from "../catalog/index";
-import type { UiCommand } from "../agent/nav";
+import { parseNavIntent, type UiCommand } from "../agent/nav";
 import { t } from "../i18n";
 import { isHeyFuture } from "../agent/arrive";
+import { formatLeaveClock, LEAVE_COUNTDOWN_MS, leaveSecondsLeft } from "./leave";
+import { utteranceReady, VOICE_HOLD_MS } from "./voice";
 import { watchLabel } from "./presence";
 import { useSoloKiosk } from "./solo";
 import { useCustomerWatch } from "./watch";
 import { type OrderInput, type OrderSession, type ReadBack } from "../order/engine";
 import styles from "./kiosk.module.css";
 
-type Stage = "attract" | "machines";
+type Screen = "attract" | "machines" | "menu" | "review" | "pay";
 type Picker = { productId: string; lineId?: string };
 
 const TEMPS: { id: Temperature; label: string; hint: string }[] = [
@@ -44,7 +46,13 @@ type ServerState = {
 };
 
 export function Kiosk() {
-  const [stage, setStage] = useState<Stage>("attract");
+  const [screen, setScreen] = useState<Screen>("attract");
+  const screenRef = useRef<Screen>("attract");
+  const sheetBack = useRef(false);
+  function show(next: Screen) {
+    screenRef.current = next;
+    setScreen(next);
+  }
   const [session, setSession] = useState<OrderSession | null>(null);
   const [readBack, setReadBack] = useState<ReadBack | null>(null);
   const [picker, setPicker] = useState<Picker | null>(null);
@@ -52,6 +60,7 @@ export function Kiosk() {
   const [say, setSay] = useState<string | null>(null);
   const [heard, setHeard] = useState<string | null>(null);
   const [speaking, setSpeaking] = useState(false);
+  const [voiceSample, setVoiceSample] = useState<VoiceSample | null>(null);
   const [spotlightIds, setSpotlightIds] = useState<string[]>([]);
   const [menu, setMenu] = useState<MachineId | null>(null);
   const [showMenu, setShowMenu] = useState(false);
@@ -161,15 +170,38 @@ export function Kiosk() {
     }
     const state = (await response.json()) as ServerState;
     if (mine !== requestSeq.current) return state;
-    if (!tick && stage === "attract") {
-      const transcript = typeof state.transcript === "string" ? state.transcript.trim() : "";
+    const transcript = typeof state.transcript === "string" ? state.transcript.trim() : "";
+    const heardNav = !tick ? parseNavIntent(transcript) : null;
+    const ui = !tick ? (state.ui ?? (heardNav?.kind === "ui" ? heardNav.ui : null)) : null;
+    const goingBack = ui === "go_back";
+    if (!tick && screenRef.current === "attract") {
       setHeard(transcript || null);
       setNotice(null);
       setSpotlightIds([]);
       setReadBack(null);
+      sheetBack.current = false;
+      if (goingBack) {
+        setSay("You're on the home screen.");
+        return state;
+      }
+      const live = session && session.phase !== "abandoned" ? session : null;
+      if (live && (heardNav || ui)) {
+        show("menu");
+        setShowMenu(true);
+        void post(`/api/sessions/${live.id}/message`, { text: transcript });
+        return state;
+      }
+      if (heardNav?.kind === "clear_cart" || ui === "open_cart") {
+        setSay("The cart is empty.");
+        return state;
+      }
+      if (ui === "scroll_up" || ui === "scroll_down") {
+        setSay("Open a menu first.");
+        return state;
+      }
       if (isHeyFuture(transcript)) {
         setSay(null);
-        setStage("machines");
+        show("machines");
         return state;
       }
       setSay(transcript ? "Say Hey Future to start." : state.say ?? "Say Hey Future to start.");
@@ -177,16 +209,26 @@ export function Kiosk() {
     }
     const nextSession = state.session;
     if (nextSession && !isNewerSession(nextSession, tick)) return state;
-    if (state.switchTo) {
-      setMenu(state.switchTo);
-      setShowMenu(true);
-    } else if (!tick && state.readBack && (nextSession?.phase === "awaiting_confirmation" || nextSession?.phase === "ready_to_pay")) {
-      setShowMenu(false);
-    }
-    if (!tick && state.ui) {
-      // Scroll and cart dock live on the menu grid.
-      setShowMenu(true);
-      setUiPulse((prev) => ({ command: state.ui!, id: (prev?.id ?? 0) + 1 }));
+    const movedBack = goingBack ? retreat() : false;
+    if (!goingBack) sheetBack.current = false;
+    if (!tick && !goingBack) {
+      if (ui && nextSession) {
+        setShowMenu(true);
+        show("menu");
+        setUiPulse((prev) => ({ command: ui, id: (prev?.id ?? 0) + 1 }));
+      } else if (state.switchTo) {
+        setMenu(state.switchTo);
+        setShowMenu(true);
+        show("menu");
+      } else if (state.readBack && nextSession?.phase === "ready_to_pay") {
+        setShowMenu(false);
+        show("pay");
+      } else if (state.readBack && nextSession?.phase === "awaiting_confirmation") {
+        setShowMenu(false);
+        show("review");
+      } else if (nextSession && (nextSession.phase === "browsing" || nextSession.phase === "drafting")) {
+        show("menu");
+      }
     }
     if (tick) {
       if (nextSession && liveSessionId.current === nextSession.id) {
@@ -199,9 +241,9 @@ export function Kiosk() {
       liveSessionId.current = nextSession.id;
       setSession(nextSession);
     }
-    setReadBack(state.switchTo ? null : state.readBack);
+    if (!goingBack) setReadBack(state.switchTo ? null : state.readBack);
     setNotice(state.notice);
-    setSay(state.say);
+    setSay(goingBack && !movedBack ? "You're on the home screen." : state.say);
     setSpotlightIds(state.spotlightIds);
     setHeard(typeof state.transcript === "string" && state.transcript ? state.transcript : null);
     if (state.audioBase64) void play(state.audioBase64);
@@ -226,7 +268,7 @@ export function Kiosk() {
     setSession(null);
     setMenu(null);
     setShowMenu(false);
-    setStage("attract");
+    show("attract");
     setReadBack(null);
     setPicker(null);
     setNotice(null);
@@ -243,6 +285,41 @@ export function Kiosk() {
     seenActivity.current = next.lastActivityAt;
     seenCart.current = next.cartVersion;
     return true;
+  }
+
+  function retreat(): boolean {
+    if (sheetBack.current) {
+      sheetBack.current = false;
+      return true;
+    }
+    const here = screenRef.current;
+    const next: Screen = here === "pay" ? "review" : here === "review" ? "menu" : here === "menu" ? "machines" : "attract";
+    if (next === here) return false;
+    show(next);
+    if (next === "menu") setShowMenu(true);
+    if (next === "review") setShowMenu(false);
+    return true;
+  }
+
+  function stepBack() {
+    if (picker) {
+      setPicker(null);
+      setSay("Going back.");
+      return;
+    }
+    const moved = retreat();
+    setSay(moved ? "Going back." : "You're on the home screen.");
+  }
+
+  function openMachine(machineId: MachineId) {
+    if (session && session.phase !== "abandoned") {
+      setPicker(null);
+      setMenu(machineId);
+      setShowMenu(true);
+      show("menu");
+      return;
+    }
+    void start(machineId);
   }
 
   function run(command: OrderInput) {
@@ -266,7 +343,7 @@ export function Kiosk() {
       setSession(null);
       setMenu(null);
       setShowMenu(false);
-      setStage("attract");
+      show("attract");
       return;
     }
     void run({ type: "cancel" });
@@ -274,19 +351,21 @@ export function Kiosk() {
 
   function send(text: string) {
     if (!session) return;
+    sheetBack.current = picker != null;
     setPicker(null);
     void post(`/api/sessions/${session.id}/message`, { text });
   }
 
   function sendClip(clip: { blob: Blob; seconds: number }) {
     if (!soloRef.current) return Promise.resolve(null);
+    sheetBack.current = picker != null;
     setPicker(null);
     const body = new FormData();
     const ext = clip.blob.type.includes("mp4") ? "mp4" : clip.blob.type.includes("ogg") ? "ogg" : "webm";
     body.append("audio", clip.blob, `talk.${ext}`);
     body.append("seconds", String(clip.seconds));
-    if (!session) {
-      if (stage === "attract") body.append("intent", "wake");
+    if (screenRef.current === "attract" || !session) {
+      if (screenRef.current === "attract") body.append("intent", "wake");
       return post("/api/arrive", body);
     }
     return post(`/api/sessions/${session.id}/speech`, body);
@@ -294,6 +373,9 @@ export function Kiosk() {
 
   const [camera, setCamera] = useState<HTMLVideoElement | null>(null);
   const watch = useCustomerWatch(camera);
+  const [leaveSeconds, setLeaveSeconds] = useState<number | null>(null);
+  const awayAt = useRef<number | null>(null);
+  const endingVisit = useRef(false);
   const paused = useRef(false);
   const talk = useConversation({
     enabled: session === null || session.phase !== "abandoned",
@@ -301,7 +383,10 @@ export function Kiosk() {
     onArm: armAudio,
     onStop: stopPlayback,
     onMiss: setNotice,
-    onSilent: () => setSay("Say Hey Future to start."),
+    onSilent: () => {
+      if (screenRef.current === "attract") setSay("Say Hey Future to start.");
+    },
+    onVoice: setVoiceSample,
     isSpeaking: () => speakingNow.current,
   });
   const talkRef = useRef(talk);
@@ -321,6 +406,30 @@ export function Kiosk() {
     talkRef.current.stop();
   }, [watch.present, leading]);
 
+  const orderOpen = Boolean(session && session.phase !== "abandoned");
+  const cameraAway = screen !== "attract" && watch.status === "looking";
+
+  useEffect(() => {
+    if (!cameraAway) {
+      awayAt.current = null;
+      endingVisit.current = false;
+      setLeaveSeconds(null);
+      return;
+    }
+    if (awayAt.current == null) awayAt.current = Date.now();
+    const timer = window.setInterval(() => {
+      const started = awayAt.current;
+      if (started == null) return;
+      const left = leaveSecondsLeft(Date.now() - started);
+      setLeaveSeconds(left);
+      if (left === 0 && orderOpen && !endingVisit.current && liveSessionId.current) {
+        endingVisit.current = true;
+        void post(`/api/sessions/${liveSessionId.current}`, { type: "cancel" });
+      }
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [cameraAway, orderOpen, screen]);
+
   function onTalk() {
     watch.enable();
     if (talk.phase === "off") {
@@ -333,40 +442,41 @@ export function Kiosk() {
   }
 
   const thinking = talk.phase === "thinking";
-  const ended = !session || session.phase === "abandoned";
+  const orderLive = Boolean(session && session.phase !== "abandoned");
   const item = picker ? getItem(picker.productId) : undefined;
 
   let body: ReactNode;
-  if (ended) {
-    body =
-      stage === "machines" ? (
-        <MachineChoice
-          say={say}
-          heard={heard}
-          speaking={speaking}
-          talkPhase={talk.phase}
-          onToggleTalk={onTalk}
-          onBack={() => {
-            setHeard(null);
-            setSay(null);
-            setStage("attract");
-          }}
-          onStart={start}
-          thinking={thinking}
-        />
-      ) : (
-        <Attract
-          say={say}
-          heard={heard}
-          notice={notice}
-          speaking={speaking}
-          talkPhase={talk.phase}
-          onToggleTalk={onTalk}
-          onStart={() => setStage("machines")}
-          thinking={thinking}
-        />
-      );
-  } else if (session.phase === "ready_to_pay" && readBack) {
+  if (screen === "attract") {
+    body = (
+      <Attract
+        say={say}
+        heard={heard}
+        notice={notice}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        onToggleTalk={onTalk}
+        onStart={() => show("machines")}
+        thinking={thinking}
+      />
+    );
+  } else if (screen === "machines" || !orderLive || !session) {
+    body = (
+      <MachineChoice
+        say={say}
+        heard={heard}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        onToggleTalk={onTalk}
+        onBack={() => {
+          setHeard(null);
+          setSay(null);
+          show("attract");
+        }}
+        onStart={openMachine}
+        thinking={thinking}
+      />
+    );
+  } else if (screen === "pay" && readBack) {
     body = (
       <Pay
         readBack={readBack}
@@ -377,11 +487,12 @@ export function Kiosk() {
         onToggleTalk={onTalk}
         onSend={send}
         onChange={() => void run({ type: "revise" })}
+        onBack={stepBack}
         onNew={cancel}
         thinking={thinking}
       />
     );
-  } else if (!showMenu && session.phase === "awaiting_confirmation" && readBack) {
+  } else if (screen === "review" && readBack) {
     body = (
       <Review
         readBack={readBack}
@@ -400,6 +511,7 @@ export function Kiosk() {
           })
         }
         onChange={() => void run({ type: "revise" })}
+        onBack={stepBack}
         thinking={thinking}
       />
     );
@@ -419,6 +531,7 @@ export function Kiosk() {
         uiPulse={uiPulse}
         onSend={send}
         onCancel={cancel}
+        onBack={stepBack}
         onPick={(productId) => setPicker({ productId })}
         onEditTemp={(lineId, productId) => setPicker({ lineId, productId })}
         onQuantity={(lineId, quantity) => void run({ type: "set_quantity", lineId, quantity })}
@@ -430,9 +543,13 @@ export function Kiosk() {
     );
   }
 
+  const leaving = leaveSeconds != null && leaveSeconds > 0;
+  const shownSeconds = leaveSeconds ?? 0;
+
   return (
     <main className={styles.frame}>
       <section className={styles.screen} aria-label="Vending machine" aria-busy={thinking || undefined}>
+        <div className={leaving ? styles.screenBlur : styles.screenFace}>
         <video
           ref={setCamera}
           className={watch.status === "looking" || watch.status === "seen" || watch.status === "starting" ? styles.camera : styles.cameraHidden}
@@ -478,22 +595,38 @@ export function Kiosk() {
             }}
           />
         ) : null}
-        {session && session.idlePrompted && session.phase !== "abandoned" && session.phase !== "ready_to_pay" ? (
-          <div className={styles.idle} role="dialog" aria-labelledby="idle-title">
-            <div className={styles.idleCard}>
-              <h2 id="idle-title">{t(session.preferredLanguage, "still_there")}</h2>
-              <p className={styles.summary}>The order will clear if nobody is at the machine.</p>
-              <button type="button" className={styles.primary} onClick={() => void run({ type: "activity" })}>
-                I'm here
-              </button>
-              <button type="button" className={styles.ghost} onClick={cancel}>
-                Start over
-              </button>
-            </div>
-          </div>
+        {talk.phase === "listening" ? <VoiceLine sample={voiceSample} /> : null}
+        </div>
+        {leaving ? (
+          <LeaveRing
+            seconds={shownSeconds}
+            label={t(session?.preferredLanguage, "order_ends_in", { time: formatLeaveClock(shownSeconds) })}
+          />
         ) : null}
       </section>
     </main>
+  );
+}
+
+function LeaveRing({ seconds, label }: { seconds: number; label: string }) {
+  const total = LEAVE_COUNTDOWN_MS / 1000;
+  const radius = 54;
+  const turn = 2 * Math.PI * radius;
+  const left = Math.min(1, Math.max(0, seconds / total));
+  return (
+    <div className={styles.leave} role="timer" aria-live="polite" aria-atomic="true" aria-label={label}>
+      <svg className={styles.leaveRing} viewBox="0 0 140 140" aria-hidden="true">
+        <circle className={styles.leaveTrack} cx="70" cy="70" r={radius} />
+        <circle
+          className={styles.leaveProgress}
+          cx="70"
+          cy="70"
+          r={radius}
+          style={{ strokeDasharray: turn, strokeDashoffset: turn * (1 - left) }}
+        />
+      </svg>
+      <p className={styles.leaveTime}>{formatLeaveClock(seconds)}</p>
+    </div>
   );
 }
 
@@ -552,11 +685,6 @@ function MachineChoice({
   onStart: (machineId: MachineId) => void;
   thinking: boolean;
 }) {
-  useEffect(() => {
-    if (!heard) return;
-    if (/^\s*(go\s+)?back[.!?]?\s*$/i.test(heard)) onBack();
-  }, [heard, onBack]);
-
   const live = talkPhase !== "off" || speaking || Boolean(heard) || Boolean(say);
   const art: Record<MachineId, string> = {
     coffee: "/images/coffee/coffee-01.webp",
@@ -631,6 +759,7 @@ function Menu({
   uiPulse,
   onSend,
   onCancel,
+  onBack,
   onPick,
   onEditTemp,
   onQuantity,
@@ -652,6 +781,7 @@ function Menu({
   uiPulse: { command: UiCommand; id: number } | null;
   onSend: (text: string) => void;
   onCancel: () => void;
+  onBack: () => void;
   onPick: (productId: string) => void;
   onEditTemp: (lineId: string, productId: string) => void;
   onQuantity: (lineId: string, quantity: number) => void;
@@ -679,6 +809,7 @@ function Menu({
 
   useEffect(() => {
     if (!uiPulse) return;
+    if (uiPulse.command === "go_back") return;
     if (uiPulse.command === "open_cart") {
       setCartOpen(true);
       return;
@@ -686,12 +817,17 @@ function Menu({
     const grid = gridRef.current;
     if (!grid) return;
     const delta = Math.max(180, Math.floor(grid.clientHeight * 0.7));
-    grid.scrollBy({ top: uiPulse.command === "scroll_down" ? delta : -delta, behavior: "smooth" });
+    const next = grid.scrollTop + (uiPulse.command === "scroll_down" ? delta : -delta);
+    grid.scrollTop = Math.max(0, next);
   }, [uiPulse]);
 
+  const missingKey = [...missing].sort().join("|");
   useEffect(() => {
     if (session.lines.length === 0) setCartOpen(false);
   }, [session.lines.length]);
+  useEffect(() => {
+    if (missing.size > 0) setCartOpen(true);
+  }, [missingKey, missing.size]);
 
   const total = cartTotal(session);
   const networkFail = notice?.includes("Couldn't reach the machine");
@@ -717,9 +853,14 @@ function Menu({
             ))}
           </div>
         </div>
-        <button type="button" className={styles.linkish} onClick={onCancel} disabled={thinking}>
-          Start over
-        </button>
+        <div className={styles.menus}>
+          <button type="button" className={styles.linkish} onClick={onBack} disabled={thinking}>
+            Back
+          </button>
+          <button type="button" className={styles.linkish} onClick={onCancel} disabled={thinking}>
+            Start over
+          </button>
+        </div>
       </header>
       <Reply say={say} heard={heard} />
       <div
@@ -836,6 +977,7 @@ function Menu({
           </p>
         ) : null}
         <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact />
+        <p className={styles.orSay}>Say go back, previous page, show cart, or scroll</p>
         {typeOpen ? (
           <Composer onSend={onSend} disabled={thinking} onClose={() => setTypeOpen(false)} />
         ) : (
@@ -937,6 +1079,7 @@ function Review({
   onSend,
   onConfirm,
   onChange,
+  onBack,
   thinking,
 }: {
   readBack: ReadBack;
@@ -949,6 +1092,7 @@ function Review({
   onSend: (text: string) => void;
   onConfirm: () => void;
   onChange: () => void;
+  onBack: () => void;
   thinking: boolean;
 }) {
   const networkFail = notice?.includes("Couldn't reach the machine");
@@ -986,7 +1130,11 @@ function Review({
           </p>
         ) : null}
         <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
+        <p className={styles.orSay}>Say go back or previous page</p>
         <Composer onSend={onSend} disabled={thinking} modest />
+        <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
+          Back
+        </button>
         <button type="button" className={styles.primary} onClick={onConfirm} disabled={thinking}>
           Confirm order
         </button>
@@ -1007,6 +1155,7 @@ function Pay({
   onToggleTalk,
   onSend,
   onChange,
+  onBack,
   onNew,
   thinking,
 }: {
@@ -1018,6 +1167,7 @@ function Pay({
   onToggleTalk: () => void;
   onSend: (text: string) => void;
   onChange: () => void;
+  onBack: () => void;
   onNew: () => void;
   thinking: boolean;
 }) {
@@ -1044,7 +1194,11 @@ function Pay({
       </div>
       <div className={styles.stack}>
         <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} />
+        <p className={styles.orSay}>Say go back or previous page</p>
         <Composer onSend={onSend} disabled={thinking} modest />
+        <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
+          Back
+        </button>
         <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
           Change order
         </button>
@@ -1075,6 +1229,7 @@ function useConversation(opts: {
   onStop: () => void;
   onMiss: (text: string) => void;
   onSilent: () => void;
+  onVoice: (sample: VoiceSample | null) => void;
   isSpeaking: () => boolean;
 }) {
   const optsRef = useRef(opts);
@@ -1092,6 +1247,7 @@ function useConversation(opts: {
     live.current = false;
     setPhase("off");
     closeMic();
+    optsRef.current.onVoice(null);
     optsRef.current.onStop();
   }
 
@@ -1125,7 +1281,7 @@ function useConversation(opts: {
       const stream = await openMic();
       if (!stream) return;
       setPhase("listening");
-      const blob = await captureUtterance(stream, () => live.current, meter);
+      const blob = await captureUtterance(stream, () => live.current, meter, (sample) => optsRef.current.onVoice(sample));
       releaseMic(stream);
       if (!live.current) break;
       if (!blob) {
@@ -1258,11 +1414,55 @@ function wait(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
+const VOICE_BARS = 24;
+const VOICE_GATE = 0.04;
+
+type VoiceSample = { bars: number[]; hearing: boolean };
+
+function frequencyBars(analyser: AnalyserNode, freq: Uint8Array<ArrayBuffer>): number[] {
+  analyser.getByteFrequencyData(freq);
+  const usable = Math.max(VOICE_BARS, Math.floor(freq.length * 0.4));
+  const step = usable / VOICE_BARS;
+  const bars: number[] = [];
+  for (let i = 0; i < VOICE_BARS; i++) {
+    const start = Math.floor(i * step);
+    const end = Math.max(start + 1, Math.floor((i + 1) * step));
+    let peak = 0;
+    for (let j = start; j < end && j < freq.length; j++) peak = Math.max(peak, freq[j] ?? 0);
+    bars.push(peak / 255);
+  }
+  return bars;
+}
+
+function VoiceLine({ sample }: { sample: VoiceSample | null }) {
+  const bars = sample?.bars ?? Array.from({ length: VOICE_BARS }, () => 0);
+  const hearing = sample?.hearing ?? false;
+  return (
+    <div
+      className={styles.voiceLine}
+      data-hearing={hearing ? "true" : "false"}
+      role="meter"
+      aria-label={hearing ? "Voice captured" : "Microphone on, no voice yet"}
+      aria-valuemin={0}
+      aria-valuemax={1}
+      aria-valuenow={hearing ? 1 : 0}
+    >
+      <span className={styles.voiceBars} aria-hidden="true">
+        {bars.map((bar, index) => (
+          <span key={index} className={styles.voiceBar} style={{ height: `${Math.round(12 + bar * 88)}%` }} />
+        ))}
+      </span>
+      <span className={styles.voiceCaption}>{hearing ? "Voice captured" : "Listening"}</span>
+    </div>
+  );
+}
+
 /** Record until the customer pauses. Returns null when the pause had no speech. */
 function captureUtterance(
   stream: MediaStream,
   live: () => boolean,
   context: AudioContext,
+  onVoice: (sample: VoiceSample | null) => void,
 ): Promise<{ blob: Blob; seconds: number } | null> {
   const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) => MediaRecorder.isTypeSupported(type));
   const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
@@ -1274,17 +1474,21 @@ function captureUtterance(
   const source = context.createMediaStreamSource(stream);
   const analyser = context.createAnalyser();
   analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.65;
   source.connect(analyser);
   const bins = new Uint8Array(analyser.fftSize);
+  const freq = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
   recorder.start(200);
 
   return new Promise((resolve) => {
     const started = Date.now();
-    let heardAt: number | null = null;
+    let voiceMs = 0;
     let lastVoice = 0;
+    let lastTick = started;
     const timer = window.setInterval(() => {
       if (!live() || recorder.state === "inactive") {
         window.clearInterval(timer);
+        onVoice(null);
         finish(false);
         return;
       }
@@ -1296,17 +1500,23 @@ function captureUtterance(
       }
       const level = Math.sqrt(sum / bins.length);
       const now = Date.now();
-      if (level >= 0.02) {
-        if (heardAt === null) heardAt = now;
+      const loud = level >= VOICE_GATE;
+      if (loud) {
+        voiceMs += now - lastTick;
         lastVoice = now;
       }
-      const spoke = heardAt !== null && now - heardAt > 280;
-      const paused = spoke && now - lastVoice > 800;
-      const tooLong = spoke && now - started > 12_000;
-      const nobody = heardAt === null && now - started > 6_000;
-      if (paused || tooLong || nobody) {
+      lastTick = now;
+      const armed = voiceMs >= VOICE_HOLD_MS;
+      onVoice({
+        bars: loud ? frequencyBars(analyser, freq) : Array.from({ length: VOICE_BARS }, () => 0),
+        hearing: armed,
+      });
+      const quietFor = lastVoice === 0 ? 0 : now - lastVoice;
+      const ready = utteranceReady(voiceMs, quietFor, now - started);
+      if (ready !== "wait") {
         window.clearInterval(timer);
-        finish(!nobody);
+        onVoice(null);
+        finish(ready === "send");
       }
     }, 50);
 

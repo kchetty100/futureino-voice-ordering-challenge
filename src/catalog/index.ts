@@ -78,5 +78,23 @@ export function speechPrompt(): string {
     const extra = aliasesFor(item.id);
     return extra.length > 0 ? `${item.name} (${extra.join(", ")})` : item.name;
   });
-  return `What snacks do you have? Snacks Bot. Boost Coffee. ${parts.join("; ")}. Hey Future.`;
+  return `Futureino menu words. ${parts.join("; ")}. Snacks Bot. Boost Coffee. Hey Future.`;
+}
+
+/** A quiet clip often comes back as the opening of the transcriber hint. That is not an order. */
+export function isPromptEcho(text: string, prompt = speechPrompt()): boolean {
+  const heard = promptWords(text);
+  const guide = promptWords(prompt);
+  if (!heard || !guide) return false;
+  return guide.startsWith(heard) || heard.startsWith(guide);
+}
+
+function promptWords(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/['\u2019]/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { speechPrompt } from "../catalog/index";
+import { isPromptEcho, speechPrompt } from "../catalog/index";
 import { createSession, type OrderSession } from "../order/engine";
 import { isHeyFuture, requestedMachine } from "./arrive";
 import { parseNavIntent } from "./nav";
@@ -49,6 +49,11 @@ describe("customer phrases", () => {
     assert.match(prompt, /Pretzels/);
     assert.match(prompt, /yellow bag/);
     assert.match(prompt, /black coffee/);
+    assert.equal(prompt.startsWith("What snacks"), false);
+    assert.equal(isPromptEcho("Futureino menu words"), true);
+    assert.equal(isPromptEcho("What snacks do you have?"), false);
+    assert.equal(isPromptEcho("iced latte"), false);
+    assert.equal(isPromptEcho("Hey Future"), false);
   });
 
   it("adds only real menu ids from a mapped sentence", () => {
@@ -100,9 +105,15 @@ describe("navigation phrases", () => {
     for (const phrase of ["scroll up", "page up"]) {
       assert.deepEqual(parseNavIntent(phrase), { kind: "ui", ui: "scroll_up" });
     }
-    for (const phrase of ["scroll down", "page down"]) {
+    for (const phrase of ["scroll down", "page down", "go down"]) {
       assert.deepEqual(parseNavIntent(phrase), { kind: "ui", ui: "scroll_down" });
     }
+    for (const phrase of ["go back", "back", "previous page", "previous screen", "take me back", "last page", "I want to go back"]) {
+      assert.deepEqual(parseNavIntent(phrase), { kind: "ui", ui: "go_back" });
+    }
+    assert.equal(parseNavIntent("go back to coffee"), null);
+    assert.equal(parseNavIntent("return to coffee screen"), null);
+    assert.deepEqual(parseNavIntent("go up"), { kind: "ui", ui: "scroll_up" });
     for (const phrase of ["clear cart", "empty cart", "clear the order"]) {
       assert.deepEqual(parseNavIntent(phrase), { kind: "clear_cart" });
     }
@@ -145,6 +156,12 @@ describe("navigation phrases", () => {
     assert.equal(cleared.session.phase, "browsing");
     assert.equal(cleared.say, "Cart cleared.");
     assert.equal(cleared.ui, null);
+
+    const back = answerWithRules(drafted.session, "previous page", 8);
+    assert.equal(back.ui, "go_back");
+    assert.equal(back.session.lines.length, 1);
+    assert.equal(back.session.phase, "awaiting_confirmation");
+    assert.equal(back.say, "Going back.");
 
     const yes = answerWithRules(drafted.session, "yes", 7);
     assert.equal(yes.session.phase, "ready_to_pay");

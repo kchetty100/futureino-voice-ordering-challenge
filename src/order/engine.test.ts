@@ -1,12 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  IDLE_ABANDON_MS,
-  IDLE_PROMPT_MS,
-  apply,
-  createSession,
-  type OrderSession,
-} from "./engine";
+import { apply, createSession, type OrderSession } from "./engine";
 
 const LATTE = "coffee-04";
 const ESPRESSO = "coffee-17";
@@ -22,9 +16,18 @@ function snacks(now = 0): OrderSession {
 }
 
 describe("order engine", () => {
-  it("keeps the idle timings used in the decision log", () => {
-    assert.equal(IDLE_PROMPT_MS, 20_000);
-    assert.equal(IDLE_ABANDON_MS, 45_000);
+  it("does not end a quiet order from the clock", () => {
+    const added = apply(coffee(), {
+      type: "add",
+      productId: LATTE,
+      temperature: "hot",
+      now: 0,
+    });
+    const later = apply(added.session, { type: "tick", now: 10 * 60_000 });
+    assert.equal(later.session.phase, "drafting");
+    assert.equal(later.session.lines.length, 1);
+    assert.equal(later.idlePrompt, false);
+    assert.equal(later.session.idlePrompted, false);
   });
 
   it("refuses a drink with no temperature and accepts it once the temperature is set", () => {
@@ -197,33 +200,23 @@ describe("order engine", () => {
     assert.equal(quiet.session.lastActivityAt, added.session.lastActivityAt);
     assert.deepEqual(quiet.session.lines, added.session.lines);
 
-    const stillHere = apply(quiet.session, { type: "tick", now: 19_999 });
+    const stillHere = apply(quiet.session, { type: "tick", now: 90_000 });
     assert.equal(stillHere.idlePrompt, false);
     assert.equal(stillHere.session.phase, "drafting");
+    assert.equal(stillHere.session.lines.length, 1);
 
-    const prompt = apply(quiet.session, { type: "tick", now: IDLE_PROMPT_MS });
-    assert.equal(prompt.ok, true);
-    assert.equal(prompt.idlePrompt, true);
-    assert.equal(prompt.session.phase, "drafting");
-    assert.equal(prompt.session.lines.length, 1);
-
-    const promptedAgain = apply(prompt.session, { type: "tick", now: IDLE_PROMPT_MS + 1_000 });
-    assert.equal(promptedAgain.idlePrompt, false);
-    assert.equal(promptedAgain.session.phase, "drafting");
-
-    const left = apply(prompt.session, { type: "tick", now: IDLE_ABANDON_MS });
+    const left = apply(quiet.session, { type: "cancel", now: 91_000 });
     assert.equal(left.session.phase, "abandoned");
     assert.equal(left.session.lines.length, 0);
-    assert.equal(left.idlePrompt, false);
 
-    const paid = apply(prompt.session, { type: "read_back", now: IDLE_PROMPT_MS });
+    const paid = apply(quiet.session, { type: "read_back", now: 20_000 });
     const confirmed = apply(paid.session, {
       type: "confirm",
       cartVersion: paid.session.cartVersion,
       source: "confirm_tap",
-      now: IDLE_PROMPT_MS,
+      now: 21_000,
     });
-    const stayed = apply(confirmed.session, { type: "tick", now: IDLE_PROMPT_MS + IDLE_ABANDON_MS });
+    const stayed = apply(confirmed.session, { type: "tick", now: 120_000 });
     assert.equal(stayed.session.phase, "ready_to_pay");
     assert.equal(stayed.session.lines.length, 1);
     assert.equal(stayed.idlePrompt, false);
@@ -232,33 +225,28 @@ describe("order engine", () => {
       type: "confirm",
       cartVersion: added.session.cartVersion,
       source: "voice_yes",
-      now: IDLE_ABANDON_MS + 1,
+      now: 92_000,
     });
     assert.equal(lateYes.ok, false);
     assert.equal(lateYes.reason, "session_abandoned");
     assert.equal(lateYes.session.lines.length, 0);
   });
 
-  it("starts the idle clock again when the customer comes back", () => {
+  it("keeps the cart when the customer has been quiet", () => {
     const added = apply(snacks(), { type: "add", productId: CHIPS, now: 0 });
-    const prompt = apply(added.session, { type: "tick", now: IDLE_PROMPT_MS });
-    assert.equal(prompt.idlePrompt, true);
+    const quiet = apply(added.session, { type: "tick", now: 120_000 });
+    assert.equal(quiet.idlePrompt, false);
+    assert.equal(quiet.session.phase, "drafting");
+    assert.equal(quiet.session.lines.length, 1);
 
-    const back = apply(prompt.session, { type: "silence", now: IDLE_PROMPT_MS + 1_000 });
-    assert.equal(back.session.idlePrompted, true);
-
-    const spoke = apply(prompt.session, {
+    const spoke = apply(quiet.session, {
       type: "set_quantity",
       lineId: "L1",
       quantity: 2,
-      now: 25_000,
+      now: 121_000,
     });
     assert.equal(spoke.session.idlePrompted, false);
-    const notYet = apply(spoke.session, { type: "tick", now: 25_000 + IDLE_PROMPT_MS - 1 });
-    assert.equal(notYet.idlePrompt, false);
-    const again = apply(spoke.session, { type: "tick", now: 25_000 + IDLE_PROMPT_MS });
-    assert.equal(again.idlePrompt, true);
-    assert.equal(again.session.phase, "drafting");
+    assert.equal(spoke.session.lines[0]?.quantity, 2);
   });
 
   it("drops ready-to-pay when the customer changes the cart", () => {
@@ -319,8 +307,7 @@ describe("order engine", () => {
       temperature: "hot",
       now: 0,
     });
-    const prompt = apply(added.session, { type: "tick", now: IDLE_PROMPT_MS });
-    const stay = apply(prompt.session, { type: "activity", now: IDLE_PROMPT_MS + 1 });
+    const stay = apply(added.session, { type: "activity", now: 1 });
     assert.equal(stay.ok, true);
     assert.equal(stay.session.idlePrompted, false);
     assert.equal(stay.session.cartVersion, added.session.cartVersion);

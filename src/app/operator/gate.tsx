@@ -29,7 +29,9 @@ export async function Gate({ children, error = false }: { children: React.ReactN
             id="password"
             name="password"
             type="password"
-            autoComplete="current-password"
+            autoComplete="off"
+            autoCapitalize="off"
+            spellCheck={false}
             required
           />
           <button className={styles.submit} type="submit">

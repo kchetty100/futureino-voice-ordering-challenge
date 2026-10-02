@@ -355,3 +355,77 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** Each open tab was hearing the same sentence and speaking the reply, so the voice came out twice. The server log showed two sessions receiving speech at the same moment.
 
 **How we checked:** `otherTabLeads` in `src/kiosk/solo.test.ts`. The dev log showed paired `/speech` calls before this change.
+
+## 2026-10-02 — Password on the whole site
+
+**Decided:** Every page and API route, including speech, asks for the existing operator password first. The sign-in page is `/enter`. A matching httpOnly cookie unlocks the kiosk and `/operator`. A wrong or missing cookie gets a redirect, or 401 on an API call. The password stays in `OPERATOR_PASSWORD` and is not sent to the browser.
+
+**Alternatives:** Vercel sign-in, which needs a Vercel account on the project. Vercel Password Protection, which is not on Hobby. A speech rate limit alone, which would leave the menu public.
+
+**Why:** The brief says the deployed app must not be open to the public, and a reviewer has to be able to get in without joining the Vercel team. The operator password is already set locally and on Vercel.
+
+**How we checked:** `src/operator/secret.test.ts`. The home screen shows the lock before the password, and `/api/arrive` returns 401 without the cookie.
+
+## 2026-10-02 — Go back works on every screen
+
+**Decided:** "Go back", "previous page", and the other screen moves (show cart, scroll, clear cart, switch machine) work on the home screen, the machine choice, the menu, review, and pay. Back walks pay, then review, then the menu, then the machines, then home. An open product sheet closes first. The cart stays. "Go back to coffee" or "go back to snacks" still switches the menu.
+
+**Alternatives:** Only the machine page understands "back". Start a new empty order when the customer returns to a machine.
+
+**Why:** A customer who says previous page on review or pay was being treated as an order, or ignored. The same words should move the screen wherever they are standing.
+
+**How we checked:** `parseNavIntent` and a rules turn in `src/agent/phrases.test.ts`. In the browser, typed "go back" and "previous page" walked pay, review, the menu, and the machine choice, kept the cart, closed an open product sheet first, and "go back to coffee" switched the menu. "Scroll down" moved the menu.
+
+## 2026-10-02 — The camera ends a visit
+
+**Decided:** The "Still there?" box is gone. A tick no longer prompts or clears the cart. The countdown stays off the home screen. After "Hey Future" leaves that screen, and the camera is watching and sees nobody for 10 seconds, the countdown starts. Then a circular countdown sits in the middle of the screen. The rest of the screen blurs behind it. The ring and the time stay sharp. If a face comes back, the countdown disappears and the cart stays. Going back to the home screen clears it. At zero the session ends. A blocked or missing camera does not start that clock. This includes the pay screen.
+
+**Alternatives:** Keep the 20-second prompt and the 45-second walk-away. End the order as soon as the face is gone. Keep the pay screen up until New order, even if the customer has left.
+
+**Why:** A person standing at the machine was losing the order because they had not tapped anything. The camera already knows whether someone is in front. The countdown gives them a minute to step back in.
+
+**How we checked:** `leaveSecondsLeft` in `src/kiosk/presence.test.ts`. A quiet tick in `src/order/engine.test.ts` keeps the cart. The kiosk no longer renders the old prompt.
+
+## 2026-10-02 — Silence is not an order
+
+**Decided:** The transcriber hint no longer starts with "What snacks do you have?" A clip is sent only after about a third of a second of actual voice. If the transcript is just the opening of that hint, it is dropped and the machine does not answer.
+
+**Alternatives:** Keep the snack question at the front of the hint. Treat every transcript as something the customer said.
+
+**Why:** A quiet moment was coming back as the first line of the hint. That line asks for the snack menu, so the machine kept saying "Please view the items below."
+
+**How we checked:** `isPromptEcho` in `src/agent/phrases.test.ts`. A real "what snacks do you have?" is not treated as the hint.
+
+## 2026-10-02 — Repeating the drink is not a new order
+
+**Decided:** While one drink is waiting for hot, iced, or room, hearing that same drink again does not add another. The machine asks for the temperature again and leaves the quantity alone. That includes a foreign spelling the menu model maps back to the same drink, such as 아메리카노 for Americano.
+
+**Alternatives:** Treat every transcript as a new add. Lock speech-to-text to English so the Korean spelling cannot appear.
+
+**Why:** The microphone stays on during the temperature choice. A clip of the drink name, often the machine's own previous "Americano" line written in Hangul, was added again and the temperature question started over.
+
+**How we checked:** Saying "latte" again while a latte has no temperature keeps quantity at 1. A model add of that same drink with no temperature does the same.
+
+## 2026-10-02 — A frequency line shows the microphone
+
+**Decided:** While the microphone is open, a frequency line sits at the top of the screen. The bars follow the live voice range. They turn blue and the caption says "Voice captured" only when the level crosses the same gate that sends a clip. Otherwise the caption stays "Listening". The line hides while the machine is speaking or thinking, because the microphone is closed then.
+
+**Alternatives:** A spinning listening dot with no level. A line that moves for any room noise, including levels too quiet to send.
+
+**Why:** Hot, iced, or room was being asked with no sign of whether the microphone had the answer. The line shows that capture on the same screen as the question.
+
+## 2026-10-02 — A short hot, iced, or room is sent
+
+**Decided:** Once the voice stays above the gate for about a seventh of a second, a short pause sends the clip. The frequency bars stay flat until that gate is crossed, and the caption says "Voice captured" only after the word is long enough to send. Adding a snack while a drink still needs a temperature names that drink, and does not ask for a temperature on the snack.
+
+**Alternatives:** Keep the third-of-a-second hold, which dropped a short "hot". Keep saying the newest item needs hot, iced, or room even when that item is a snack.
+
+**Why:** The line was moving while "hot" never left the browser. A snack added beside an unfinished drink was then announced as if the snack needed a temperature.
+
+## 2026-10-02 — Each drink in an "and" order gets a temperature
+
+**Decided:** "A daily black and a mocha" adds both drinks. "Americano, mocha and cappuccino" adds all three, including a mishear such as "american, mocha and capacino", and a list with no comma such as "americano mocha and cappuccino". The cart opens with a hot, iced, or room choice on each one. A single temperature word sets the first drink still waiting and then asks for the next by name. "Both hot", "hot for both", and "cold for both" set every waiting drink. "Hot, iced and room" follows the cart order. "Daily black iced and mocha hot" sets each named drink.
+
+**Alternatives:** One temperature word sets every drink. Ask "which drink?" and wait before setting any.
+
+**Why:** A temperature used to apply only when exactly one drink was waiting, so the second drink in an "and" order could not be finished by voice.

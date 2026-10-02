@@ -2,7 +2,7 @@ import { aliasesFor, CATALOG, getItem, type MachineId, type Temperature } from "
 import { chatUsage } from "../operator/cost";
 import { noteUsage } from "../operator/log";
 import { apply, type OrderSession } from "../order/engine";
-import { langOf } from "../i18n";
+import { langOf, t } from "../i18n";
 import { machineIntro } from "./arrive";
 import { finishIfComplete, type TurnResult } from "./rules";
 import { runTool, type ToolEffect } from "./tools";
@@ -91,6 +91,28 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
     };
   }
   if (heard.action !== "add" || heard.lines.length === 0) return null;
+
+  const pending = session.lines.filter(
+    (line) => getItem(line.productId)?.requiresTemperature === true && line.temperature === undefined,
+  );
+  const onlyPending = pending.length === 1 ? pending[0] : undefined;
+  if (
+    onlyPending &&
+    heard.lines.length === 1 &&
+    heard.lines[0]?.productId === onlyPending.productId &&
+    !heard.lines[0]?.temperature
+  ) {
+    const item = getItem(onlyPending.productId);
+    const stayed = apply(session, { type: "activity", now });
+    return {
+      session: stayed.session,
+      say: t(langOf(stayed.session), "needs_temp", { name: item?.name ?? "That drink" }),
+      spotlightIds: [],
+      readBack: null,
+      switchTo: null,
+      ui: null,
+    };
+  }
 
   let current = session;
   let last: ToolEffect | null = null;

@@ -1,7 +1,7 @@
 /** Screen actions the kiosk applies after a turn. Cart writes stay in the engine. */
 import { clearCartCue, openCartCue, scrollDownCue, scrollUpCue } from "../i18n";
 
-export type UiCommand = "open_cart" | "scroll_up" | "scroll_down";
+export type UiCommand = "open_cart" | "scroll_up" | "scroll_down" | "go_back";
 
 export type NavIntent =
   | { kind: "ui"; ui: UiCommand }
@@ -15,6 +15,8 @@ export function parseNavIntent(text: string): NavIntent | null {
   const normalized = spoken(text);
   if (!normalized) return null;
 
+  if (wantsBack(normalized)) return { kind: "ui", ui: "go_back" };
+
   if (wantsClearCart(normalized)) return { kind: "clear_cart" };
 
   if (scrollUpCue(normalized)) return { kind: "ui", ui: "scroll_up" };
@@ -23,6 +25,19 @@ export function parseNavIntent(text: string): NavIntent | null {
   if (wantsOpenCart(normalized)) return { kind: "ui", ui: "open_cart" };
 
   return null;
+}
+
+/** Bare back / previous page. "Go back to coffee" stays a machine switch. */
+function wantsBack(normalized: string): boolean {
+  if (/\b(coffee|snack|snacks|drink|drinks|boost)\b/.test(normalized)) return false;
+  const bare = normalized.replace(/^(please|can you|could you)\s+/, "").replace(/\s+please$/, "");
+  if (/^(go |take me |page )?(back|return)$/.test(bare)) return true;
+  if (/^(previous|last)( page| screen)?$/.test(bare)) return true;
+  if (bare === "page back" || bare === "go backwards") return true;
+  if (/\b(go back|take me back|previous page|previous screen|last page|last screen|page back)\b/.test(bare)) {
+    return true;
+  }
+  return /^(atrás|atras|volver|regresa|retour|revenir|חזור|אחורה|terug|vorige|vorige bladsy)$/.test(bare);
 }
 
 function wantsClearCart(normalized: string): boolean {

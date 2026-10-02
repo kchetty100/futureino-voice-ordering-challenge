@@ -5,13 +5,11 @@ import type { AppLanguage } from "../i18n";
  * The only writer of a cart. Voice and touch both send commands here.
  * A model may propose a product; it cannot mark an order ready to pay.
  *
- * Time is passed in. Silence does not count as activity. After
- * IDLE_PROMPT_MS the engine asks once if anyone is still there. After
- * IDLE_ABANDON_MS it clears the cart.
+ * Time is passed in. Silence does not count as activity. A tick does not
+ * prompt or clear the cart. The kiosk ends a visit when the camera has
+ * seen nobody, after a countdown.
  */
 
-export const IDLE_PROMPT_MS = 20_000;
-export const IDLE_ABANDON_MS = 45_000;
 export const MAX_QUANTITY = 9;
 
 export type Phase =
@@ -178,16 +176,7 @@ export function apply(session: OrderSession, command: OrderCommand): ApplyResult
   }
 }
 
-function applyTick(session: OrderSession, now: number): ApplyResult {
-  if (session.phase === "ready_to_pay") return ok(session);
-  const elapsed = now - session.lastActivityAt;
-  if (elapsed >= IDLE_ABANDON_MS) {
-    return ok(abandon(session));
-  }
-  if (elapsed >= IDLE_PROMPT_MS && !session.idlePrompted) {
-    const prompted: OrderSession = { ...session, idlePrompted: true };
-    return { ...ok(prompted), idlePrompt: true };
-  }
+function applyTick(session: OrderSession, _now: number): ApplyResult {
   return ok(session);
 }
 

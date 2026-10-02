@@ -9,6 +9,8 @@ export type PhraseKey =
   | "heres_cart"
   | "scroll_up"
   | "scroll_down"
+  | "going_back"
+  | "open_menu_first"
   | "ready_to_pay"
   | "already_ready"
   | "stale_yes"
@@ -44,7 +46,8 @@ export type PhraseKey =
   | "not_awaiting_confirmation"
   | "stale_cart"
   | "walked_away"
-  | "still_there";
+  | "still_there"
+  | "order_ends_in";
 
 type Params = Record<string, string | number | undefined>;
 
@@ -57,6 +60,8 @@ const EN: Record<PhraseKey, string> = {
   heres_cart: "Here's your cart.",
   scroll_up: "Scrolling up.",
   scroll_down: "Scrolling down.",
+  going_back: "Going back.",
+  open_menu_first: "Open a menu first.",
   ready_to_pay: "Ready to pay {total}.",
   already_ready: "This order is already ready to pay.",
   stale_yes: "That yes was for an older cart. Ask me to read the order again.",
@@ -93,6 +98,7 @@ const EN: Record<PhraseKey, string> = {
   stale_cart: "That order changed. Ask me to read it again.",
   walked_away: "The customer walked away. The cart was cleared.",
   still_there: "Still there?",
+  order_ends_in: "No one in front. This order ends in {time}.",
 };
 
 const ES: Record<PhraseKey, string> = {
@@ -104,6 +110,8 @@ const ES: Record<PhraseKey, string> = {
   heres_cart: "Aquí está tu carrito.",
   scroll_up: "Subiendo.",
   scroll_down: "Bajando.",
+  going_back: "Volviendo atrás.",
+  open_menu_first: "Abre un menú primero.",
   ready_to_pay: "Listo para pagar {total}.",
   already_ready: "Este pedido ya está listo para pagar.",
   stale_yes: "Ese sí era de un carrito anterior. Pídeme que lea el pedido otra vez.",
@@ -140,6 +148,7 @@ const ES: Record<PhraseKey, string> = {
   stale_cart: "Ese pedido cambió. Pídeme que lo lea otra vez.",
   walked_away: "El cliente se fue. Se vació el carrito.",
   still_there: "¿Sigues ahí?",
+  order_ends_in: "No hay nadie delante. Este pedido termina en {time}.",
 };
 
 const FR: Record<PhraseKey, string> = {
@@ -151,6 +160,8 @@ const FR: Record<PhraseKey, string> = {
   heres_cart: "Voici votre panier.",
   scroll_up: "Je remonte.",
   scroll_down: "Je descends.",
+  going_back: "Je reviens en arrière.",
+  open_menu_first: "Ouvrez d'abord un menu.",
   ready_to_pay: "Prêt à payer {total}.",
   already_ready: "Cette commande est déjà prête à payer.",
   stale_yes: "Ce oui concernait un ancien panier. Demandez-moi de relire la commande.",
@@ -187,6 +198,7 @@ const FR: Record<PhraseKey, string> = {
   stale_cart: "Cette commande a changé. Demandez-moi de la relire.",
   walked_away: "Le client est parti. Le panier a été vidé.",
   still_there: "Toujours là ?",
+  order_ends_in: "Personne devant la machine. Cette commande se termine dans {time}.",
 };
 
 const HE: Record<PhraseKey, string> = {
@@ -198,6 +210,8 @@ const HE: Record<PhraseKey, string> = {
   heres_cart: "הנה העגלה שלך.",
   scroll_up: "גולל למעלה.",
   scroll_down: "גולל למטה.",
+  going_back: "חוזר אחורה.",
+  open_menu_first: "קודם תפתח תפריט.",
   ready_to_pay: "מוכן לתשלום {total}.",
   already_ready: "ההזמנה כבר מוכנה לתשלום.",
   stale_yes: "האישור היה לעגלה ישנה. בקש ממני לקרוא שוב את ההזמנה.",
@@ -234,6 +248,7 @@ const HE: Record<PhraseKey, string> = {
   stale_cart: "ההזמנה השתנתה. בקש ממני לקרוא אותה שוב.",
   walked_away: "הלקוח הלך. העגלה רוקנה.",
   still_there: "עדיין כאן?",
+  order_ends_in: "אין אף אחד מול המכונה. ההזמנה תסתיים בעוד {time}.",
 };
 
 const AF: Record<PhraseKey, string> = {
@@ -245,6 +260,8 @@ const AF: Record<PhraseKey, string> = {
   heres_cart: "Hier is jou mandjie.",
   scroll_up: "Rolle op.",
   scroll_down: "Rolle af.",
+  going_back: "Ek gaan terug.",
+  open_menu_first: "Maak eers 'n spyskaart oop.",
   ready_to_pay: "Gereed om {total} te betaal.",
   already_ready: "Hierdie bestelling is reeds gereed om te betaal.",
   stale_yes: "Daardie ja was vir 'n ouer mandjie. Vra my om die bestelling weer te lees.",
@@ -281,6 +298,7 @@ const AF: Record<PhraseKey, string> = {
   stale_cart: "Daardie bestelling het verander. Vra my om dit weer te lees.",
   walked_away: "Die kliënt het weggeloop. Die mandjie is skoongemaak.",
   still_there: "Nog daar?",
+  order_ends_in: "Niemand voor die masjien. Hierdie bestelling eindig oor {time}.",
 };
 
 const TABLES: Record<AppLanguage, Record<PhraseKey, string>> = {

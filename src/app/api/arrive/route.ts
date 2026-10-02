@@ -1,4 +1,5 @@
-import { speechPrompt } from "../../../catalog/index";
+import { parseNavIntent } from "../../../agent/nav";
+import { isPromptEcho, speechPrompt } from "../../../catalog/index";
 import { detectLanguage, languageFromSttLabel, t } from "../../../i18n";
 import { beginLobby, noteUsageFor, recordTurn, saveRecord } from "../../../operator/log";
 import { arriveSession } from "../../../session/store";
@@ -28,7 +29,7 @@ export async function POST(request: Request) {
     try {
       // First utterance: do not force English; let STT auto-detect.
       const heard = await transcribe(audio, PROMPT, clipSeconds(form), null);
-      text = heard.text === PROMPT ? "" : heard.text;
+      text = isPromptEcho(heard.text, PROMPT) ? "" : heard.text;
       usage = heard.usage;
       sttLanguageLabel = heard.detectedLanguage;
     } catch (error) {
@@ -48,6 +49,38 @@ export async function POST(request: Request) {
       ui: null,
       transcript: text,
       audioBase64: null,
+    });
+  }
+
+  const nav = parseNavIntent(text);
+  if (nav) {
+    const lang = detectLanguage(text) ?? languageFromSttLabel(sttLanguageLabel) ?? "en";
+    const ui = nav.kind === "ui" ? nav.ui : null;
+    const say =
+      nav.kind === "clear_cart" || ui === "open_cart"
+        ? t(lang, "cart_empty")
+        : ui === "scroll_up" || ui === "scroll_down"
+          ? t(lang, "open_menu_first")
+          : t(lang, "going_back");
+    let audioBase64: string | null = null;
+    if (process.env.OPENAI_API_KEY) {
+      try {
+        const playback = await synthesize(say, lang);
+        audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
+      } catch (error) {
+        console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
+      }
+    }
+    return Response.json({
+      session: null,
+      readBack: null,
+      say,
+      notice: null,
+      spotlightIds: [],
+      switchTo: null,
+      ui,
+      transcript: text,
+      audioBase64,
     });
   }
 

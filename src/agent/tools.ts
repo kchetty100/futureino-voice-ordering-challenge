@@ -194,7 +194,15 @@ function sayForAdd(result: ApplyResult, productId: string, temperature?: Tempera
     result.session.lines[result.session.lines.length - 1];
   const item = line ? getItem(line.productId) : undefined;
   const name = item?.name ?? t(langOf(result.session), "that_item");
-  if (result.missing.length > 0) return t(langOf(result.session), "added_need_temp", { name });
+  if (result.missing.length > 0) {
+    const pendingNames = result.missing.map((field) => getItem(field.productId)?.name ?? name);
+    const listed = pendingNames.length === 1 ? pendingNames[0] : `${pendingNames.slice(0, -1).join(", ")} and ${pendingNames[pendingNames.length - 1]}`;
+    const addedNeedsTemp = result.missing.length === 1 && result.missing[0]?.productId === productId;
+    if (addedNeedsTemp) return t(langOf(result.session), "added_need_temp", { name: listed });
+    const addedLine = t(langOf(result.session), "added", { temp: tempLabel(line?.temperature), name });
+    const key = pendingNames.length === 1 ? "needs_temp" : "need_temps";
+    return `${addedLine} ${t(langOf(result.session), key, { name: listed, names: listed })}`;
+  }
   return t(langOf(result.session), "added", { temp: tempLabel(line?.temperature), name });
 }
 

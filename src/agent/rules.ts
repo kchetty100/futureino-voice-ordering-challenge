@@ -101,6 +101,15 @@ function directReply(session: OrderSession, text: string, now: number): TurnResu
     return declineOrder(session, now);
   }
 
+  const every = temperatureForEvery(text);
+  if (every && session.lines.some(needsTemperature)) {
+    return setTemperatures(
+      session,
+      session.lines.filter(needsTemperature).map((line) => ({ line, temperature: every })),
+      now,
+    );
+  }
+
   const edited = editCartBySpeech(session, text, now);
   if (edited) return edited;
 
@@ -133,21 +142,8 @@ function directReply(session: OrderSession, text: string, now: number): TurnResu
     );
   }
 
-  const missing = session.lines.filter(needsTemperature);
-  const spoken = spokenTemperature(text);
-  if (spoken === "many" && missing.length > 0) {
-    const stayed = apply(session, { type: "activity", now });
-    return done(stayed.session, t(langOf(stayed.session), "say_one_temp"), [], null);
-  }
-  if (spoken && spoken !== "many" && missing.length === 1) {
-    const line = missing[0];
-    if (!line) return null;
-    const saved = runTool(session, "set_temperature", { lineId: line.lineId, temperature: spoken }, now);
-    if (saved.session.lines.every((candidate) => !needsTemperature(candidate))) {
-      return finishIfComplete(saved, now);
-    }
-    return fromEffect(saved);
-  }
+  const temperatures = temperaturesForWaiting(session, text, now);
+  if (temperatures) return temperatures;
 
   return null;
 }
@@ -190,6 +186,11 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
     return done(stayed.session, t(langOf(session), "can_offer", { names }), close.map((item) => item.id), null);
   }
 
+  if (sameDrinkAlreadyWaiting(session, best.id, temperature)) {
+    const stayed = apply(session, { type: "activity", now });
+    return done(stayed.session, t(langOf(stayed.session), "needs_temp", { name: best.name }), [], null);
+  }
+
   const added = runTool(
     session,
     "add_to_cart",
@@ -202,12 +203,9 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
   return finishIfComplete(added, now);
 }
 
-/** "latte and chips" is two items. "cookies and cream" stays one product. */
+/** "latte and chips" is two items. "americano, mocha and cappuccino" is three. "cookies and cream" stays one product. */
 function addJoined(session: OrderSession, text: string, now: number): TurnResult | null {
-  const parts = text
-    .split(/\s*(?:,|&|\band\b|\bplus\b)\s*/)
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
+  const parts = listParts(text);
   if (parts.length < 2) return null;
   const hits = parts.map(preciseItem);
   if (hits.some((hit) => hit === null)) return null;
@@ -239,6 +237,72 @@ function addJoined(session: OrderSession, text: string, now: number): TurnResult
   const listed = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
   const key = names.length === 1 ? "needs_temp" : "need_temps";
   return { ...finished, say: t(langOf(finished.session), key, { name: listed, names: listed }) };
+}
+
+const LIST_FILLER = new Set([
+  "a", "an", "the", "i", "me", "my", "want", "like", "please", "can", "get", "have", "one", "of", "to", "for", "with", "also", "just",
+]);
+
+function listParts(text: string): string[] {
+  const split = text
+    .split(/\s*(?:,|&|\band\b|\bplus\b)\s*/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  const merged = mergeNamedParts(split.length > 0 ? split : [text]);
+  const expanded = merged.flatMap((part) => expandNamedPart(part));
+  return expanded.length >= 2 ? expanded : split;
+}
+
+/** "cookies" + "cream" is one snack. A bare "and" split must not break that name. */
+function mergeNamedParts(parts: string[]): string[] {
+  const merged: string[] = [];
+  let index = 0;
+  while (index < parts.length) {
+    const here = parts[index] ?? "";
+    const next = parts[index + 1];
+    if (next && !preciseItem(here) && preciseItem(`${here} and ${next}`)) {
+      merged.push(`${here} and ${next}`);
+      index += 2;
+      continue;
+    }
+    merged.push(here);
+    index += 1;
+  }
+  return merged;
+}
+
+/** "americano mocha" is two drinks when the words were not separated by and or a comma. */
+function expandNamedPart(part: string): string[] {
+  if (preciseItem(part)) return [part];
+  const tokens = part
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0 && !LIST_FILLER.has(token));
+  const spans: string[] = [];
+  let index = 0;
+  while (index < tokens.length) {
+    let end = index;
+    const room = Math.min(tokens.length, index + 4);
+    for (let cursor = room; cursor > index; cursor -= 1) {
+      if (preciseItem(tokens.slice(index, cursor).join(" "))) {
+        end = cursor;
+        break;
+      }
+    }
+    if (end === index) {
+      const token = tokens[index] ?? "";
+      const previous = spans[spans.length - 1];
+      if (previous && findTemperature(token) && !findTemperature(previous)) {
+        spans[spans.length - 1] = `${previous} ${token}`;
+        index += 1;
+        continue;
+      }
+      return [part];
+    }
+    spans.push(tokens.slice(index, end).join(" "));
+    index = end;
+  }
+  return spans.length > 1 ? spans : [part];
 }
 
 function preciseItem(text: string): { item: { id: string; name: string; requiresTemperature: boolean }; temperature: Temperature | null } | null {
@@ -312,6 +376,13 @@ function namesAMissingItem(text: string): boolean {
 
 function needsTemperature(line: CartLine): boolean {
   return getItem(line.productId)?.requiresTemperature === true && line.temperature === undefined;
+}
+
+/** The customer repeated the drink that is already waiting for hot, iced, or room. */
+function sameDrinkAlreadyWaiting(session: OrderSession, productId: string, temperature: Temperature | null | undefined): boolean {
+  if (temperature) return false;
+  const missing = session.lines.filter(needsTemperature);
+  return missing.length === 1 && missing[0]?.productId === productId;
 }
 
 /** Spoken cart edits stay on the review. They do not open a menu. */
@@ -461,6 +532,11 @@ function handleNav(session: OrderSession, text: string, now: number): TurnResult
     return done(result.session, hadItems ? t(langOf(result.session), "cart_cleared") : t(langOf(result.session), "cart_empty"), [], null);
   }
 
+  if (intent.ui === "go_back") {
+    const stayed = apply(session, { type: "activity", now });
+    return { ...done(stayed.session, t(langOf(stayed.session), "going_back"), [], null), ui: "go_back" };
+  }
+
   if (intent.ui === "open_cart") {
     const stayed = apply(session, { type: "activity", now });
     if (stayed.session.lines.length === 0) {
@@ -512,6 +588,91 @@ const TEMP_FILLER = new Set([
   "drink",
   "coffee",
 ]);
+
+type TempAssignment = { line: CartLine; temperature: Temperature };
+
+/** Each drink from an "and" order can take its own temperature, or one word can move to the next drink. */
+function temperaturesForWaiting(session: OrderSession, text: string, now: number): TurnResult | null {
+  const missing = session.lines.filter(needsTemperature);
+  if (missing.length === 0) return null;
+
+  const parts = text
+    .split(/\s*(?:,|&|\band\b|\bplus\b)\s*/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length >= 2) {
+    const planned = planTemperatureParts(missing, parts);
+    if (planned) return setTemperatures(session, planned, now);
+  }
+
+  const named = preciseItem(text);
+  if (named?.temperature) {
+    const line = missing.find((candidate) => candidate.productId === named.item.id);
+    if (line) return setTemperatures(session, [{ line, temperature: named.temperature }], now);
+  }
+
+  const spoken = spokenTemperature(text);
+  if (spoken === "many") {
+    const stayed = apply(session, { type: "activity", now });
+    return done(stayed.session, t(langOf(stayed.session), "say_one_temp"), [], null);
+  }
+  if (spoken) {
+    const line = missing[0];
+    if (!line) return null;
+    return setTemperatures(session, [{ line, temperature: spoken }], now);
+  }
+  return null;
+}
+
+/** "hot for both", "cold for both", "make them both iced". One temperature for every waiting drink. */
+function temperatureForEvery(text: string): Temperature | null {
+  const normalized = text.trim().toLowerCase().replace(/[.?!,']/g, " ");
+  if (!/\b(both|all|them|every|everything)\b/.test(normalized)) return null;
+  const spoken = spokenTemperature(
+    normalized.replace(
+      /\b(both|all|them|every|everything|for|the|of|these|those|drinks|drink|coffees|coffee|make|please|they|are|is|too|want|like)\b/g,
+      " ",
+    ),
+  );
+  if (!spoken || spoken === "many") return null;
+  return spoken;
+}
+
+function planTemperatureParts(missing: CartLine[], parts: string[]): TempAssignment[] | null {
+  const bare = parts.map((part) => spokenTemperature(part));
+  if (bare.length === missing.length && bare.every((temp): temp is Temperature => temp !== null && temp !== "many")) {
+    return missing.map((line, index) => ({ line, temperature: bare[index] as Temperature }));
+  }
+  const named: TempAssignment[] = [];
+  for (const part of parts) {
+    const hit = preciseItem(part);
+    if (!hit?.temperature) return null;
+    const line = missing.find((candidate) => candidate.productId === hit.item.id && !named.some((pick) => pick.line.lineId === candidate.lineId));
+    if (!line) return null;
+    named.push({ line, temperature: hit.temperature });
+  }
+  return named.length > 0 ? named : null;
+}
+
+function setTemperatures(session: OrderSession, pairs: TempAssignment[], now: number): TurnResult {
+  let current = session;
+  let last: ToolEffect | null = null;
+  for (const pair of pairs) {
+    last = runTool(current, "set_temperature", { lineId: pair.line.lineId, temperature: pair.temperature }, now);
+    if (!last.ok) return fromEffect(last);
+    current = last.session;
+  }
+  if (!last) return done(session, t(langOf(session), "choose_temp"), [], null);
+  const still = current.lines.filter(needsTemperature);
+  if (still.length === 0) return finishIfComplete(last, now);
+  const doneLine = pairs
+    .map((pair) => `${getItem(pair.line.productId)?.name ?? "That drink"} is ${pair.temperature}`)
+    .join(". ");
+  const waiting = still.map((line) => getItem(line.productId)?.name ?? t(langOf(current), "that_item"));
+  const listed = waiting.length === 1 ? waiting[0] : `${waiting.slice(0, -1).join(", ")} and ${waiting[waiting.length - 1]}`;
+  const key = waiting.length === 1 ? "needs_temp" : "need_temps";
+  return done(current, `${doneLine}. ${t(langOf(current), key, { name: listed, names: listed })}`, [], null);
+}
 
 /** A temperature, when the customer is not also naming a product. "many" means more than one was heard. */
 function spokenTemperature(text: string): Temperature | "many" | null {
