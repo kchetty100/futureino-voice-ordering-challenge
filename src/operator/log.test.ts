@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { passwordMatches } from "./access";
 import { estimateSpeech, estimateUsd, transcribeUsage } from "./cost";
+import { orderTotal } from "./format";
 import { noteUsageFor, operatorSession } from "./log";
 import { commandSession, messageSession, openSession } from "../session/store";
 
@@ -29,6 +30,7 @@ describe("operator log", () => {
     assert.equal(view.transcript[0]?.customer, "iced latte");
     assert.match(view.transcript[0]?.say ?? "", /Latte/);
     assert.equal(view.carts[0]?.lines.length, 0);
+    assert.equal(orderTotal(view), "$3.60");
     assert.equal(view.carts.at(-1)?.lines[0]?.name, "Latte");
     assert.equal(view.carts.at(-1)?.lines[0]?.temperature, "iced");
     assert.equal(view.carts.at(-1)?.phase, "awaiting_confirmation");

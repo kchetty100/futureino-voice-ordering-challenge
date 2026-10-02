@@ -31,7 +31,7 @@ Server env, production and preview:
 - `OPERATOR_PASSWORD`
 - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (the Vercel names `KV_REST_API_URL` and `KV_REST_API_TOKEN` are the same store)
 
-The browser never receives the speech key or the password. The gate is an httpOnly cookie. Speech calls are capped at 120 per address per hour and 800 for the whole site per UTC day. Past that, the kiosk says the machine is resting its voice. With Redis unset, the cap is counted in the current process. On Vercel it is counted in Redis, so a second instance shares it.
+The browser never receives the speech key or the password. The gate is an httpOnly cookie. Eight wrong passwords from one address in 15 minutes lock that address for the rest of the window. Speech calls are capped at 120 per address per hour and 800 for the whole site per UTC day. Past that, the kiosk says the machine is resting its voice. With Redis unset, both counts stay in the current process. On Vercel they are counted in Redis, so a second instance shares them.
 
 ## What a conversation costs
 
@@ -46,10 +46,10 @@ A short order (a few clips, a few spoken replies, one text pass) lands around a 
 ## Known limitations
 
 - Product matching is still mostly English names and a short alias list. The five reply languages do not each have a full menu vocabulary.
-- A quiet room can still be transcribed as the wrong words. A transcript that contains the speech hint is dropped. Other hallucinations are not.
-- The face model is downloaded from a CDN in the browser. The video stays on the device. A blocked or missing camera does not start the leave countdown.
+- A quiet room can still be heard as the wrong product name, and that name can still change the cart. A transcript of the speech hint is dropped, and so is a clip of the machine's own line. Nearby talk that is not an order leaves the cart alone. A one-letter miss of hot, cold, iced, or room is treated as that temperature.
+- The face model is downloaded from a CDN in the browser. The video stays on the device. With nobody in frame, the one-minute countdown starts after 10 seconds. With the camera blocked, still starting, or face detection not loaded, that countdown starts after three quiet minutes. A tap, a spoken turn, or a face clears it. The home screen does not count down.
 - Operator records in Redis expire after 7 days.
-- A voice turn can still run into the Hobby function time limit.
+- The order call returns the cart and the on-screen line before any audio. The voice is a second request, signed for that exact line and usable once. Hobby can still cut off the hearing call, or the extra text pass on an unclear sentence.
 - Payment is out of scope. The flow stops at pay.
 
 ## What I would do next

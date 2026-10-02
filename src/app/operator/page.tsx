@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { formatSeconds, formatUsd } from "../../operator/cost";
-import { machineName, phaseName, preview, when } from "../../operator/format";
+import { machineName, orderTotal, phaseName, preview, when } from "../../operator/format";
 import { listOperatorSessions } from "../../operator/log";
 import { Gate, Shell } from "./gate";
 import styles from "./operator.module.css";
@@ -52,12 +52,12 @@ async function OrderList() {
           <Link className={styles.card} href={`/operator/${session.id}`}>
             <div className={styles.row}>
               <span className={styles.machine}>{machineName(session.machineId)}</span>
-              <span className={styles.meta}>{when(session.updatedAt)}</span>
+              <span className={styles.total}>{orderTotal(session) ?? "—"}</span>
             </div>
             <p className={styles.preview}>{preview(session)}</p>
             <p className={styles.meta}>
-              {phaseName(session.phase)} · {session.transcript.length} turns · {formatUsd(session.costUsd)} ·{" "}
-              {formatSeconds(session.audioSeconds)} audio
+              {when(session.updatedAt)} · {phaseName(session.phase)} · {session.transcript.length} turns · speech{" "}
+              {formatUsd(session.costUsd)} · {formatSeconds(session.audioSeconds)} audio
             </p>
           </Link>
         </li>

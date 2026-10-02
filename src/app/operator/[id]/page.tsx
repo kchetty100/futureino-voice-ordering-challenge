@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { formatSeconds, formatUsd } from "../../../operator/cost";
-import { machineName, money, phaseName, speaker, when } from "../../../operator/format";
+import { machineName, money, orderTotal, phaseName, speaker, when } from "../../../operator/format";
 import { operatorAllowed, operatorConfigured } from "../../../operator/access";
 import { operatorSession } from "../../../operator/log";
 import { Gate, Shell } from "../gate";
@@ -39,6 +39,10 @@ export default async function OperatorOrderPage({ params }: { params: Promise<{ 
         <ul className={styles.stats}>
           <li className={styles.stat}>
             Cost
+            <b>{orderTotal(session) ?? "—"}</b>
+          </li>
+          <li className={styles.stat}>
+            Speech
             <b>{formatUsd(session.costUsd)}</b>
           </li>
           <li className={styles.stat}>

@@ -24,6 +24,13 @@ export function money(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
 }
 
+/** Latest cart total, the amount the customer would pay. */
+export function orderTotal(session: OperatorView): string | null {
+  const latest = session.carts[session.carts.length - 1];
+  if (!latest) return null;
+  return money(latest.totalCents);
+}
+
 export function when(ms: number): string {
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
