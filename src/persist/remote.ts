@@ -16,6 +16,16 @@ export async function sharedGet(key: string): Promise<string | null> {
   return typeof value === "string" ? value : null;
 }
 
+export async function sharedGetCount(key: string): Promise<number> {
+  const value = await command<unknown>("GET", key);
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const count = Number(value);
+    return Number.isFinite(count) ? count : 0;
+  }
+  return 0;
+}
+
 export async function sharedSet(key: string, value: string): Promise<void> {
   await command("SET", key, value, "EX", WEEK_SECONDS);
 }

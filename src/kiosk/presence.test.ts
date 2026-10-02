@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { formatLeaveClock, leaveSecondsLeft } from "./leave";
+import { BLIND_BEFORE_COUNTDOWN_MS, formatLeaveClock, leaveSecondsLeft } from "./leave";
 import { nextPresence, type Presence } from "./presence";
 import { utteranceReady } from "./voice";
 
@@ -42,5 +42,11 @@ describe("leaving when the camera sees nobody", () => {
     assert.equal(leaveSecondsLeft(70_000), 0);
     assert.equal(formatLeaveClock(60), "1:00");
     assert.equal(formatLeaveClock(9), "0:09");
+  });
+
+  it("waits three quiet minutes when the camera cannot see", () => {
+    assert.equal(leaveSecondsLeft(BLIND_BEFORE_COUNTDOWN_MS - 1, BLIND_BEFORE_COUNTDOWN_MS), null);
+    assert.equal(leaveSecondsLeft(BLIND_BEFORE_COUNTDOWN_MS, BLIND_BEFORE_COUNTDOWN_MS), 60);
+    assert.equal(leaveSecondsLeft(BLIND_BEFORE_COUNTDOWN_MS + 60_000, BLIND_BEFORE_COUNTDOWN_MS), 0);
   });
 });

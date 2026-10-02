@@ -1,13 +1,20 @@
 import { NextResponse } from "next/server";
 import { operatorConfigured, operatorCookie, operatorToken, passwordMatches, safeNext } from "../../../../operator/access";
+import { loginBlocked, noteFailedLogin, speechClientIp } from "../../../../operator/budget";
 
 export async function POST(request: Request) {
   const form = await request.formData();
   const password = String(form.get("password") ?? "");
   const next = safeNext(String(form.get("next") ?? "/operator"));
+  const ip = speechClientIp(request);
+  const reject = (code: "1" | "2") => {
+    const page = next.startsWith("/operator") ? "/operator" : "/enter";
+    return NextResponse.redirect(new URL(`${page}?error=${code}`, request.url), 303);
+  };
+  if (await loginBlocked(ip)) return reject("2");
   if (!operatorConfigured() || !passwordMatches(password)) {
-    const back = next.startsWith("/operator") ? "/operator?error=1" : "/enter?error=1";
-    return NextResponse.redirect(new URL(back, request.url), 303);
+    if (await noteFailedLogin(ip)) return reject("2");
+    return reject("1");
   }
   const token = operatorToken();
   const response = NextResponse.redirect(new URL(next, request.url), 303);

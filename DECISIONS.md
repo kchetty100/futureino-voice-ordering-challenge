@@ -489,3 +489,133 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** The wake phrase should hand them to the choice, out loud, and the screen should match.
 
 **How we checked:** `wakeSay` in `src/agent/phrases.test.ts`.
+
+## 2026-10-02 — A correction is not a yes
+
+**Decided:** On review or pay, "that's wrong", "wrong item", "hold on", and "that's not right" step back to change the order. They do not confirm it. A model label of decline does the same, even when the sentence is not already a cart edit. A confirm label still has to be free of a change.
+
+**Alternatives:** Let the confirmation model treat an unrecognized decline as yes. Only decline when the sentence contains "no" or "change".
+
+**Why:** "That's wrong" missed the cart-edit words, the model was told to call that a decline, and the turn then accepted the order.
+
+**How we checked:** `answerWithRules` keeps the latte and asks what to change. `confirmationDecision` returns decline for a model decline, and null for "yes but make it hot".
+
+## 2026-10-02 — A spoken count is the quantity
+
+**Decided:** "Two iced lattes" and "a couple of pretzels" add one line with quantity 2. Counts run from 2 through 9, plus "a couple" and "a pair". Two different counts in one sentence stay at 1. A trailing s is folded only when a count was spoken and the plural is not already a menu name, so "lattes" can mean Latte and "chips" still lists the chip snacks.
+
+**Alternatives:** Always add one and wait for "one more". Ask the menu model for a quantity field.
+
+**Why:** The add path ignored the number, so two drinks became one.
+
+**How we checked:** `answerWithRules` for "two iced lattes" and "a couple of pretzels". "Chips" still offers Potato Chips rather than one cookie.
+
+## 2026-10-02 — Free-from questions are allergen questions
+
+**Decided:** "Gluten free", "nut free", and "does it have milk" get the unknown-allergen line. The cart does not change. The ingredient has to sit next to a word like free, contain, or have.
+
+**Alternatives:** Only the words allergen and allergy. Guess from the photo.
+
+**Why:** Those questions were falling through to "this machine doesn't carry that."
+
+**How we checked:** `answerWithRules` on "is this gluten free?", "nut free?", and "does it have milk".
+
+## 2026-10-02 — Cart edits follow the pinned language
+
+**Decided:** "Added one more", "Removed", and "Latte is hot" use the same phrase table as the rest of the agent. A clarify from the menu model uses "I can offer" in that language too. Product names stay English.
+
+**Alternatives:** Leave those four sentences in English.
+
+**Why:** A Spanish session was still hearing English for a quantity change.
+
+**How we checked:** An iced latte, language pinned to Spanish, then "one more", says "Añadí uno más de Latte".
+
+## 2026-10-02 — Playback is not the next order
+
+**Decided:** The microphone stays closed for 900 ms after the machine finishes speaking. A transcript that repeats the line just spoken, and is at least a short sentence, is dropped. A short "yes" is kept.
+
+**Alternatives:** Reopen the mic the instant playback ends. Drop any transcript that shares a word with the line.
+
+**Why:** A loud speaker can be heard as the customer, including a read-back that contains the word yes.
+
+**How we checked:** `isPlaybackEcho` drops the full read-back and keeps "yes" and "two iced lattes".
+
+## 2026-10-02 — A language tap does not drop the reply in flight
+
+**Decided:** Choosing a language writes the pin with its own request. It does not cancel the voice turn that is already on the way back.
+
+**Alternatives:** Send the language through the same request queue as an order.
+
+**Why:** That queue keeps only the newest response. A language tap during thinking threw away the spoken line, and the cart could appear a second later with no audio.
+
+The welcome line already on screen moves with the button too, so it does not stay in the previous language next to the new one.
+
+## 2026-10-02 — A generic wipe empties the cart
+
+**Decided:** "Remove everything from the cart", "remove all of it", "delete everything", "start over", "scratch that", and "get rid of all of it" empty the cart and leave the visit open. "Remove all the lattes" removes only that product. The model may also return clear, remove, set a quantity, or set a temperature. The engine still applies those actions, and a model still cannot confirm. A cart edit that already named a line stays with the rules. A remove that matched no line can go to the model.
+
+**Alternatives:** Let the one-item remove rule keep any sentence that contains "remove". Let the model write the cart in its own words.
+
+**Why:** "Remove everything" was read as "remove one line," and the model was never asked. Its menu map could add a product, not empty the cart.
+
+**How we checked:** `answerWithRules` clears a latte and chips for those wipe phrases, and "remove all the lattes" leaves the chips. `applyHeard` clears, removes one product, and sets a quantity of 3. "Remove the latte" still removes one line.
+
+## 2026-10-02 — A counted list with one temperature
+
+**Decided:** "Give me 1 american, 2 mocas and 1 latte all hot" is three lines: one hot Americano, two hot Mochas, and one hot Latte. Each part keeps its own count. "All hot" at the end applies to every drink in that list that did not name its own temperature. A misspelling is accepted only when it shares the first three letters of a single menu name and is one consonant off, so "mocas" can mean Mocha and "wrong" does not become a drink.
+
+**Alternatives:** Send every list to the model. Add "mocas" as a one-off alias.
+
+**Why:** The list splitter kept the drinks and dropped the counts, and "all hot" was stuck on the last drink. "Mocas" was not close enough for the exact name score, so the whole list was discarded.
+
+**How we checked:** `answerWithRules` on that sentence. "That's wrong" on review still asks what to change.
+
+## 2026-10-02 — A quiet tick does not touch the shared cart
+
+**Decided:** The kiosk no longer posts a tick every second. A tick that does arrive is read and not written back. The visit still ends from the camera countdown, which posts cancel.
+
+**Alternatives:** Keep the poll so a second server could push a change into this tab.
+
+**Why:** The tick no longer changes the cart. With Redis on, each one still read the session and wrote it back, about once a second, on every open order.
+
+**How we checked:** `commandSession` with a tick leaves the operator transcript length unchanged. The kiosk has no one-second session poll.
+
+## 2026-10-02 — A camera that cannot see still ends the visit
+
+**Decided:** When the camera is watching and sees nobody, the countdown is unchanged: 10 seconds, then one minute. When the camera is blocked, still starting, or face detection did not load, the same one-minute countdown starts after three minutes with no tap and no spoken turn. A tap or a spoken turn moves the last activity and clears it. A face in front still keeps the cart. The home screen does not count down.
+
+**Alternatives:** Leave a denied camera running until someone taps New order. Use the 10-second face clock for a denied camera too.
+
+**Why:** A blocked camera never started the clock, so an open order and an open microphone could sit there. A person who is still ordering resets the quiet window by talking or tapping.
+
+**How we checked:** `leaveSecondsLeft` with the three-minute window. A working camera still waits 10 seconds of an empty frame.
+
+## 2026-10-02 — Eight wrong passwords, then a wait
+
+**Decided:** Eight wrong passwords from one address in 15 minutes lock that address for the rest of the window. The sign-in page says to wait. A different address is unaffected. The password stays one shared `OPERATOR_PASSWORD`. The count lives in Redis when the shared store is configured, and in this process otherwise.
+
+**Alternatives:** A separate account per reviewer. Vercel Password Protection, which is not on Hobby.
+
+**Why:** The shared password is what a reviewer can type without a Vercel account. Nothing was slowing a script that guessed it.
+
+**How we checked:** `noteFailedLogin` locks the eighth failure and leaves the next address open.
+
+## 2026-10-02 — The cart comes back before the voice
+
+**Decided:** A voice turn returns the cart and the on-screen line as soon as they are known. The audio is a second request, signed for that exact line, and it can be used once. The screen still says the line the speaker reads.
+
+**Alternatives:** Keep transcription, understanding, and speech inside one response, with the audio as base64. Stream the audio inside that same response.
+
+**Why:** Those three steps in one function are the long silence, and on Hobby the call can run out of time before the cart ever reaches the screen.
+
+**How we checked:** `issueSpeakTicket` accepts the line once and rejects a second use, a different line, and an expired permit. The speech route no longer waits on synthesis.
+
+## 2026-10-02 — Nearby talk does not change the cart
+
+**Decided:** A transcript changes the cart only when it is an order, a menu question, a yes or no, or a cart edit. Anything else gets "I didn't catch that" while browsing, or the confirm reminder on review, and the model is not asked. A model add, remove, or temperature is kept only for a product the customer named.
+
+**Alternatives:** Send every transcript to the model. Drop the microphone unless the customer says Hey Future before every sentence.
+
+**Why:** People near the machine talk to each other. A clip of the machine's own line was already ignored. Other mishears could still become a cart change.
+
+**How we checked:** "What time does the movie start" leaves an iced latte in place. "She was telling me the latte shop is closed" adds nothing. A model add of Latte from that movie sentence is dropped. "I'll have the mocha please" still names Mocha.

@@ -3,17 +3,21 @@
  * One process counts in memory. Redis counts across Vercel instances when it is configured.
  */
 
-import { sharedIncr, sharedStoreConfigured } from "../persist/remote";
+import { sharedGetCount, sharedIncr, sharedStoreConfigured } from "../persist/remote";
 
 /** A person talking through a review stays under this. A script on one address does not. */
 export const SPEECH_PER_IP_PER_HOUR = 120;
 /** Site-wide cap for the UTC day, across every address. */
 export const SPEECH_PER_DAY = 800;
+/** Wrong passwords from one address before sign-in waits. */
+export const LOGIN_FAILURES = 8;
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const HOUR_TTL_SECONDS = 2 * 60 * 60;
 const DAY_TTL_SECONDS = 2 * 24 * 60 * 60;
+const LOGIN_TTL_SECONDS = 30 * 60;
 
 const buckets = new Map<string, { count: number; expiresAt: number }>();
 
@@ -44,11 +48,41 @@ export async function claimSpeech(ip: string, now = Date.now()): Promise<boolean
   return used <= SPEECH_PER_DAY;
 }
 
+export async function loginBlocked(ip: string, now = Date.now()): Promise<boolean> {
+  const { key } = loginWindow(ip, now);
+  return (await readCount(key, now)) >= LOGIN_FAILURES;
+}
+
+/** True when this wrong password locks the address for the rest of the window. */
+export async function noteFailedLogin(ip: string, now = Date.now()): Promise<boolean> {
+  const { key, expiresAt } = loginWindow(ip, now);
+  const count = await bump(key, LOGIN_TTL_SECONDS, expiresAt, now);
+  return count >= LOGIN_FAILURES;
+}
+
 export function speechBudgetDenied(): Response {
   return Response.json(
     { error: "The machine is resting its voice. Try again in a little while." },
     { status: 429 },
   );
+}
+
+function loginWindow(ip: string, now: number): { key: string; expiresAt: number } {
+  const start = Math.floor(now / LOGIN_WINDOW_MS) * LOGIN_WINDOW_MS;
+  return { key: `futureino:budget:login:${ip}:${start}`, expiresAt: start + LOGIN_WINDOW_MS };
+}
+
+async function readCount(key: string, now: number): Promise<number> {
+  if (sharedStoreConfigured()) {
+    try {
+      return await sharedGetCount(key);
+    } catch (error) {
+      console.error("Login budget store failed, counting in this process.", error instanceof Error ? error.message : "unknown error");
+    }
+  }
+  const existing = buckets.get(key);
+  if (!existing || existing.expiresAt <= now) return 0;
+  return existing.count;
 }
 
 async function bump(key: string, ttlSeconds: number, expiresAt: number, now: number): Promise<number> {

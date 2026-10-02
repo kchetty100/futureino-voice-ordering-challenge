@@ -91,6 +91,17 @@ export function beginLobby(now: number): string {
   return id;
 }
 
+/** The latest line the machine spoke, used to drop a clip of that playback. */
+export function lastSpokenSay(id: string): string | null {
+  const record = records.get(id);
+  if (!record) return null;
+  for (let index = record.transcript.length - 1; index >= 0; index -= 1) {
+    const say = record.transcript[index]?.say?.trim();
+    if (say) return say;
+  }
+  return null;
+}
+
 export function recordTurn(id: string, entry: TranscriptEntry) {
   const record = records.get(id);
   if (!record) return;

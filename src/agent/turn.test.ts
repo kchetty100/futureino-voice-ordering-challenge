@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import { machineForUtterance, requestedMachine } from "./arrive";
 import { answerWithRules } from "./rules";
 import { applyHeard } from "./understand";
-import { chooseTurn } from "./turn";
+import { chooseTurn, confirmationDecision, heardForSpeech } from "./turn";
 import { changesOrder, isClearYes, runTool } from "./tools";
 import { createSession } from "../order/engine";
 
@@ -216,6 +216,17 @@ describe("text agent", () => {
     const four = answerWithRules(coffee(), "americano, mocha, cappuccino and latte", 10);
     assert.equal(four.session.lines.length, 4);
 
+    const counted = answerWithRules(coffee(), "give me 1 american , 2 mocas and 1 latte all hot", 12);
+    assert.deepEqual(
+      counted.session.lines.map((line) => [line.productId, line.quantity, line.temperature]),
+      [
+        ["coffee-01", 1, "hot"],
+        ["coffee-06", 2, "hot"],
+        ["coffee-04", 1, "hot"],
+      ],
+    );
+    assert.equal(counted.session.phase, "awaiting_confirmation");
+
     const temps = answerWithRules(three.session, "hot, iced and room", 11);
     assert.equal(temps.session.lines[0]?.temperature, "hot");
     assert.equal(temps.session.lines[1]?.temperature, "iced");
@@ -419,5 +430,110 @@ describe("text agent", () => {
     assert.equal(rem.session.lines[0]?.productId, "snacks-19");
     assert.match(rem.say, /Removed Spiced Chai/);
     assert.doesNotMatch(rem.say, /What do you want to change/);
+  });
+
+  it("clears the cart for a generic wipe and removes only the named product", () => {
+    const drafted = answerWithRules(coffee(), "iced latte and potato chips", 1);
+    assert.equal(drafted.session.lines.length, 2);
+
+    const lattes = answerWithRules(drafted.session, "remove all the lattes", 2);
+    assert.equal(lattes.session.lines.length, 1);
+    assert.equal(lattes.session.lines[0]?.productId, "snacks-19");
+    assert.match(lattes.say, /Removed Latte/);
+
+    const one = answerWithRules(drafted.session, "remove the latte", 3);
+    assert.equal(one.session.lines.length, 1);
+    assert.equal(one.session.lines[0]?.productId, "snacks-19");
+
+    for (const phrase of ["remove everything from the cart", "delete everything", "start over", "scratch that", "get rid of all of it"]) {
+      const wiped = answerWithRules(drafted.session, phrase, 4);
+      assert.equal(wiped.session.lines.length, 0, phrase);
+      assert.equal(wiped.session.phase, "browsing", phrase);
+      assert.equal(wiped.say, "Cart cleared.", phrase);
+      assert.notEqual(wiped.session.phase, "ready_to_pay", phrase);
+    }
+  });
+
+  it("treats a correction on review as a change, not a yes", () => {
+    const drafted = answerWithRules(coffee(), "iced latte", 1);
+    for (const phrase of ["that's wrong", "wrong item", "hold on", "that's not right"]) {
+      const turned = answerWithRules(drafted.session, phrase, 2);
+      assert.notEqual(turned.session.phase, "ready_to_pay", phrase);
+      assert.equal(turned.session.lines.length, 1, phrase);
+      assert.match(turned.say, /What do you want to change/, phrase);
+    }
+    const paid = answerWithRules(drafted.session, "yes", 3);
+    assert.equal(paid.session.phase, "ready_to_pay");
+  });
+
+  it("never accepts a model decline", () => {
+    assert.equal(confirmationDecision("decline", "that's wrong"), "decline");
+    assert.equal(confirmationDecision("decline", "wait"), "decline");
+    assert.equal(confirmationDecision("confirm", "sounds good"), "accept");
+    assert.equal(confirmationDecision("confirm", "yes but make it hot"), null);
+    assert.equal(confirmationDecision("other", "a mocha"), null);
+  });
+
+  it("hears a spoken count as the quantity", () => {
+    const lattes = answerWithRules(coffee(), "two iced lattes", 1);
+    assert.equal(lattes.session.lines.length, 1);
+    assert.equal(lattes.session.lines[0]?.productId, "coffee-04");
+    assert.equal(lattes.session.lines[0]?.quantity, 2);
+    assert.equal(lattes.session.lines[0]?.temperature, "iced");
+
+    const pretzels = answerWithRules(snacks(), "a couple of pretzels", 2);
+    assert.equal(pretzels.session.lines.length, 1);
+    assert.equal(pretzels.session.lines[0]?.productId, "snacks-22");
+    assert.equal(pretzels.session.lines[0]?.quantity, 2);
+  });
+
+  it("answers gluten free and nut free without offering an item", () => {
+    for (const phrase of ["is this gluten free?", "nut free?", "does it have milk"]) {
+      const turn = answerWithRules(coffee(), phrase, 1);
+      assert.equal(turn.session.lines.length, 0, phrase);
+      assert.match(turn.say, /don't have allergen information/, phrase);
+    }
+  });
+
+  it("says a cart edit in the pinned language", () => {
+    const drafted = answerWithRules(coffee(), "iced latte", 1);
+    const more = answerWithRules({ ...drafted.session, preferredLanguage: "es", languageSet: true }, "one more", 2);
+    assert.equal(more.session.lines[0]?.quantity, 2);
+    assert.match(more.say, /Añadí uno más de Latte/);
+  });
+
+  it("leaves the cart alone when the words are not an order", () => {
+    const drafted = answerWithRules(coffee(), "iced latte", 1);
+    const aside = answerWithRules(drafted.session, "what time does the movie start", 2);
+    assert.equal(aside.session.lines.length, 1);
+    assert.equal(aside.session.lines[0]?.productId, "coffee-04");
+    assert.equal(aside.session.lines[0]?.temperature, "iced");
+    assert.equal(aside.session.phase, drafted.session.phase);
+    assert.match(aside.say, /Add another item, or say yes/);
+
+    const browsing = answerWithRules(coffee(), "she was telling me the latte shop is closed", 3);
+    assert.equal(browsing.session.lines.length, 0);
+    assert.equal(browsing.say, "I didn't catch that.");
+
+    const mumble = answerWithRules(coffee(), "and uh", 4);
+    assert.equal(mumble.session.lines.length, 0);
+    assert.equal(mumble.say, "I didn't catch that.");
+  });
+
+  it("does not let a model add a drink the customer did not name", () => {
+    const blocked = heardForSpeech("what time does the movie start", {
+      action: "add",
+      lines: [{ productId: "coffee-04", temperature: "hot", quantity: 1 }],
+      choices: [],
+      menu: null,
+    });
+    assert.equal(blocked, null);
+    const kept = heardForSpeech("I'll have the mocha please", {
+      action: "add",
+      lines: [{ productId: "coffee-06", temperature: "hot", quantity: 1 }],
+      choices: [],
+      menu: null,
+    });
+    assert.equal(kept?.lines[0]?.productId, "coffee-06");
   });
 });

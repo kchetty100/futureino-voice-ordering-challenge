@@ -1,9 +1,9 @@
-import { aliasesFor, getItem, type MachineId, type Temperature } from "../catalog/index";
+import { aliasesFor, CATALOG, getItem, type CatalogItem, type MachineId, type Temperature } from "../catalog/index";
 import { applyLanguageCue, langOf, t, temperatureFromCue } from "../i18n";
 import { apply, MAX_QUANTITY, type OrderSession, type CartLine, type ReadBack } from "../order/engine";
 import { machineIntro, requestedMachine } from "./arrive";
 import { parseNavIntent, type UiCommand } from "./nav";
-import { asksAllergens, isClearNo, isClearYes, itemScore, money, runTool, searchCatalog, wantsChange, wantsNoMore, type ToolEffect } from "./tools";
+import { asksAllergens, isClearNo, isClearYes, itemScore, money, namesAProduct, productMentioned, runTool, searchCatalog, wantsChange, wantsCorrection, wantsNoMore, type ToolEffect } from "./tools";
 
 export type { UiCommand };
 
@@ -65,11 +65,48 @@ export function answerWithRules(session: OrderSession, text: string, now: number
     const stayed = apply(localized, { type: "activity", now });
     return done(stayed.session, ack, [], null);
   }
-  const turn = customerGuard(localized, text, now) ?? interpret(localized, text, now);
+  const guarded = customerGuard(localized, text, now);
+  const turn = guarded ?? (mentionsOrder(text) ? interpret(localized, text, now) : roomTalk(localized, now));
   if (ack && turn.session.preferredLanguage === fields.preferredLanguage) {
     return { ...turn, say: `${ack} ${turn.say}`.trim() };
   }
   return turn;
+}
+
+/**
+ * Talk aimed at the machine: an order, a menu question, a yes or no, or a cart edit.
+ * A nearby conversation is none of those, so it must not change the cart.
+ */
+export function mentionsOrder(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (parseNavIntent(trimmed)) return true;
+  if (isCartEditUtterance(trimmed)) return true;
+  if (isClearYes(trimmed) || isClearNo(trimmed) || wantsNoMore(trimmed) || wantsCorrection(trimmed) || wantsChange(trimmed)) return true;
+  if (asksAllergens(trimmed)) return true;
+  if (spokenTemperature(trimmed)) return true;
+  if (requestedMachine(trimmed)) return true;
+  if (parseLanguageOnly(trimmed)) return true;
+  if (/\b(sweet|salty|chocolate|crunchy|chewy|crispy|nutty|fruity|creamy|spiced|mild|rich|light|heavy|snack|snacks|coffee|menu|recommend)\b/i.test(trimmed)) return true;
+  if (/^(that'?s all|that is all|done|checkout|check out)$/i.test(trimmed)) return true;
+  if (namesAProduct(trimmed)) return true;
+  return looksLikeItemAttempt(trimmed);
+}
+
+/** A short phrase such as "a burger", which should be answered as a missing item. */
+function looksLikeItemAttempt(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  if (/^(what|when|where|why|who|how|did|does|do|is|are|was|were|can|could)\b/.test(normalized)) return false;
+  const filler = new Set(["a", "an", "the", "some", "please", "just", "um", "uh", "and", "oh", "so", "yeah", "yep", "ok"]);
+  const tokens = normalized.split(/[^a-z0-9]+/).filter((token) => token.length > 2 && !filler.has(token));
+  return tokens.length === 1;
+}
+
+function roomTalk(session: OrderSession, now: number): TurnResult {
+  const stayed = apply(session, { type: "activity", now });
+  const reviewing = session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay";
+  const say = reviewing ? t(langOf(stayed.session), "add_or_confirm") : t(langOf(stayed.session), "didnt_catch");
+  return done(stayed.session, say, [], null);
 }
 
 /** True when the utterance is only a language switch, not an order. */
@@ -91,6 +128,15 @@ export function isCartEditUtterance(text: string): boolean {
   return cartVerb(text) !== null;
 }
 
+/** A remove or quantity sentence that named no cart line. The model may still map it. */
+export function isUnresolvedCartEdit(session: OrderSession, text: string): boolean {
+  if (parseNavIntent(text)?.kind === "clear_cart") return false;
+  const verb = cartVerb(text);
+  if (!verb || session.lines.length === 0) return false;
+  if (verb === "remove" && mentionsEvery(text) && productTarget(text)) return false;
+  return spokenCartLine(session, text, verb) === undefined;
+}
+
 function directReply(session: OrderSession, text: string, now: number): TurnResult | null {
   if (isClearYes(text)) return acceptOrder(session, now);
 
@@ -98,6 +144,10 @@ function directReply(session: OrderSession, text: string, now: number): TurnResu
   if (reviewing && wantsNoMore(text) && !wantsChange(text)) return acceptOrder(session, now);
 
   if (isClearNo(text) && reviewing) {
+    return declineOrder(session, now);
+  }
+
+  if (reviewing && wantsCorrection(text) && !preciseItem(text)) {
     return declineOrder(session, now);
   }
 
@@ -157,8 +207,10 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
   const joined = addJoined(session, normalized, now);
   if (joined) return joined;
 
-  const temperature = findTemperature(normalized);
-  const query = stripTemperature(normalized);
+  const quantity = spokenCount(normalized);
+  const counted = stripCount(normalized);
+  const temperature = findTemperature(counted);
+  const query = catalogQuery(stripTemperature(counted), quantity > 1);
   if (/\b(light|not too heavy)\b/.test(normalized)) {
     return offerVague(session, query || "sweet", now, { light: true });
   }
@@ -179,6 +231,7 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
   const bestScore = best ? itemScore(best, query || normalized) : 0;
   const secondScore = second ? itemScore(second, query || normalized) : 0;
   const precise = best && bestScore >= 5 && bestScore - secondScore >= 3;
+  if (precise && best && !productMentioned(normalized, best.id)) return roomTalk(session, now);
   if (!precise || !best) {
     const stayed = apply(session, { type: "activity", now });
     const close = ranked.filter((item) => itemScore(item, query || normalized) >= bestScore - 2).slice(0, 3);
@@ -186,7 +239,7 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
     return done(stayed.session, t(langOf(session), "can_offer", { names }), close.map((item) => item.id), null);
   }
 
-  if (sameDrinkAlreadyWaiting(session, best.id, temperature)) {
+  if (quantity === 1 && sameDrinkAlreadyWaiting(session, best.id, temperature)) {
     const stayed = apply(session, { type: "activity", now });
     return done(stayed.session, t(langOf(stayed.session), "needs_temp", { name: best.name }), [], null);
   }
@@ -196,6 +249,7 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
     "add_to_cart",
     {
       productId: best.id,
+      ...(quantity > 1 ? { quantity } : {}),
       ...(temperature && best.requiresTemperature ? { temperature } : {}),
     },
     now,
@@ -205,7 +259,8 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
 
 /** "latte and chips" is two items. "americano, mocha and cappuccino" is three. "cookies and cream" stays one product. */
 function addJoined(session: OrderSession, text: string, now: number): TurnResult | null {
-  const parts = listParts(text);
+  const shared = peelSharedTemperature(text);
+  const parts = listParts(shared.text);
   if (parts.length < 2) return null;
   const hits = parts.map(preciseItem);
   if (hits.some((hit) => hit === null)) return null;
@@ -215,12 +270,14 @@ function addJoined(session: OrderSession, text: string, now: number): TurnResult
   const ids: string[] = [];
   for (const hit of hits) {
     if (!hit) return null;
+    const temperature = hit.temperature ?? (hit.item.requiresTemperature ? shared.temperature : null);
     const added = runTool(
       current,
       "add_to_cart",
       {
         productId: hit.item.id,
-        ...(hit.temperature && hit.item.requiresTemperature ? { temperature: hit.temperature } : {}),
+        ...(hit.quantity > 1 ? { quantity: hit.quantity } : {}),
+        ...(temperature ? { temperature } : {}),
       },
       now,
     );
@@ -305,17 +362,156 @@ function expandNamedPart(part: string): string[] {
   return spans.length > 1 ? spans : [part];
 }
 
-function preciseItem(text: string): { item: { id: string; name: string; requiresTemperature: boolean }; temperature: Temperature | null } | null {
-  const temperature = findTemperature(text);
-  const query = stripTemperature(text);
-  const hits = searchCatalog(query || text);
+function preciseItem(text: string): { item: { id: string; name: string; requiresTemperature: boolean }; temperature: Temperature | null; quantity: number } | null {
+  const quantity = spokenCount(text);
+  const counted = stripCount(text);
+  const temperature = findTemperature(counted);
+  const bare = stripTemperature(counted);
+  const query = catalogQuery(bare, quantity > 1);
+  const looked = query || counted;
+  const hits = searchCatalog(looked);
   const best = hits[0];
-  if (!best) return null;
   const second = hits[1];
-  const bestScore = itemScore(best, query || text);
-  const secondScore = second ? itemScore(second, query || text) : 0;
-  if (bestScore >= 5 && bestScore - secondScore >= 3) return { item: best, temperature };
-  return null;
+  const bestScore = best ? itemScore(best, looked) : 0;
+  const secondScore = second ? itemScore(second, looked) : 0;
+  if (best && bestScore >= 5 && bestScore - secondScore >= 3) return { item: best, temperature, quantity };
+  if (bestScore >= 5) return null;
+  const fuzzy = fuzzyItem(bare);
+  if (!fuzzy) return null;
+  return { item: fuzzy, temperature, quantity };
+}
+
+/** "all hot" at the end of a list applies to every drink that did not name its own temperature. */
+function peelSharedTemperature(text: string): { text: string; temperature: Temperature | null } {
+  const match = text.match(
+    /\b(?:all|everything|every one|all of them|all of these)\s+(hot|iced|ice|cold|room(?:\s+temp(?:erature)?)?)\s*$/i,
+  );
+  if (!match || match.index == null) return { text, temperature: null };
+  const temperature = findTemperature(match[0]);
+  const stripped = text.slice(0, match.index).replace(/[,\s]+$/, "").trim();
+  if (!temperature || !stripped) return { text, temperature: null };
+  return { text: stripped, temperature };
+}
+
+/** A one-letter miss such as "mocas" for Mocha, when the exact name score found nothing. */
+function fuzzyItem(query: string): CatalogItem | null {
+  const tokens = query
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 4 && !LIST_FILLER.has(token));
+  if (tokens.length === 0) return null;
+  const ranks: Array<{ item: CatalogItem; rank: number }> = [];
+  for (const item of CATALOG) {
+    const rank = fuzzyRank(tokens, item);
+    if (rank == null) continue;
+    ranks.push({ item, rank });
+  }
+  ranks.sort((a, b) => a.rank - b.rank || a.item.name.localeCompare(b.item.name));
+  const best = ranks[0];
+  const second = ranks[1];
+  if (!best || best.rank > 1) return null;
+  if (second && second.rank <= best.rank) return null;
+  return best.item;
+}
+
+function fuzzyRank(tokens: string[], item: CatalogItem): number | null {
+  const phrases = [item.name, ...aliasesFor(item.id)];
+  let best: number | null = null;
+  for (const token of tokens) {
+    const stem = token.replace(/s$/i, "");
+    const heard = [token, stem].filter((word, index, all) => word.length >= 4 && all.indexOf(word) === index && skeleton(word).length >= 3);
+    if (heard.length === 0) continue;
+    for (const phrase of phrases) {
+      const phraseWords = phrase.toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+      const penalty = phraseWords.length > 1 ? 2 : 0;
+      for (const word of phraseWords) {
+        if (word.length < 4 || skeleton(word).length < 3) continue;
+        const distance = Math.min(...heard.map((candidate) => editDistance(skeleton(candidate), skeleton(word))));
+        const prefix = heard.some((candidate) => sharedPrefix(candidate, word) >= 3);
+        if (distance > 1 || !prefix) continue;
+        const rank = distance + penalty;
+        if (best == null || rank < best) best = rank;
+      }
+    }
+  }
+  return best;
+}
+
+function sharedPrefix(left: string, right: string): number {
+  const end = Math.min(left.length, right.length);
+  let count = 0;
+  while (count < end && left[count] === right[count]) count += 1;
+  return count;
+}
+
+function skeleton(word: string): string {
+  return word
+    .toLowerCase()
+    .replace(/[^a-z]/g, "")
+    .replace(/[aeiou]/g, "")
+    .replace(/(.)\1+/g, "$1");
+}
+
+function editDistance(left: string, right: string): number {
+  if (Math.abs(left.length - right.length) > 1) return 2;
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let row = 1; row <= left.length; row += 1) {
+    const next = [row];
+    for (let column = 1; column <= right.length; column += 1) {
+      const cost = left[row - 1] === right[column - 1] ? 0 : 1;
+      next[column] = Math.min((previous[column] ?? 2) + 1, (next[column - 1] ?? 2) + 1, (previous[column - 1] ?? 2) + cost);
+    }
+    previous = next;
+  }
+  return previous[right.length] ?? 2;
+}
+
+const COUNT_WORD: Record<string, number> = {
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+};
+
+/** "two lattes" is quantity 2. Two different counts in one phrase stay at 1. */
+function spokenCount(text: string): number {
+  const normalized = text.toLowerCase();
+  const picks: Array<{ index: number; count: number }> = [];
+  const couple = /\b(?:a\s+)?(?:couple|pair)(?:\s+of)?\b/.exec(normalized);
+  if (couple?.index != null) picks.push({ index: couple.index, count: 2 });
+  const digit = /\b([2-9])\b/.exec(normalized);
+  if (digit?.index != null && digit[1]) picks.push({ index: digit.index, count: Number(digit[1]) });
+  const word = /\b(two|three|four|five|six|seven|eight|nine)\b/.exec(normalized);
+  if (word?.index != null && word[1]) picks.push({ index: word.index, count: COUNT_WORD[word[1]] ?? 1 });
+  if (picks.length === 0) return 1;
+  picks.sort((a, b) => a.index - b.index);
+  const first = picks[0];
+  if (!first || picks.some((pick) => pick.count !== first.count)) return 1;
+  return first.count;
+}
+
+/** "two lattes" can mean Latte. A bare "chips" is not rewritten into "chip". */
+function catalogQuery(text: string, counted: boolean): string {
+  const trimmed = text.trim();
+  if (!trimmed || !counted) return trimmed;
+  const hits = searchCatalog(trimmed);
+  const best = hits[0];
+  if (best && itemScore(best, trimmed) >= 5) return trimmed;
+  const singular = trimmed.replace(/\b([a-z]{3,})s\b/gi, "$1");
+  return singular === trimmed ? trimmed : singular;
+}
+
+function stripCount(text: string): string {
+  if (spokenCount(text) === 1) return text;
+  return text
+    .replace(/\b(?:a\s+)?(?:couple|pair)(?:\s+of)?\b/gi, " ")
+    .replace(/\b(two|three|four|five|six|seven|eight|nine|[2-9])\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function offerVague(
@@ -385,20 +581,69 @@ function sameDrinkAlreadyWaiting(session: OrderSession, productId: string, tempe
   return missing.length === 1 && missing[0]?.productId === productId;
 }
 
-/** Spoken cart edits stay on the review. They do not open a menu. */
-function editCartBySpeech(session: OrderSession, text: string, now: number): TurnResult | null {
-  const verb = cartVerb(text);
-  if (!verb || session.lines.length === 0) return null;
-  // Heat ignores temp when matching. Remove/less may still match a unique product if spoken temp differs.
+function mentionsEvery(text: string): boolean {
+  return /\b(all|every|everything)\b/.test(text.toLowerCase());
+}
+
+function productTarget(text: string): { item: { id: string; name: string }; temperature: Temperature | null } | null {
+  const direct = preciseItem(text);
+  if (direct) return direct;
+  const singular = text.replace(/\b([a-z]{3,})s\b/gi, "$1");
+  if (singular === text) return null;
+  return preciseItem(singular);
+}
+
+function spokenCartLine(
+  session: OrderSession,
+  text: string,
+  verb: "remove" | "less" | "more" | "heat",
+): CartLine | undefined {
   const named = cartLineFor(session, text, {
     ignoreTemperature: verb === "heat",
     allowTempMismatch: verb === "remove" || verb === "less",
   });
   const only = session.lines.length === 1 ? session.lines[0] : undefined;
   const stray = strayWords(session, text);
-  const line = named ?? (only && stray.length === 0 && !pointsElsewhere(text, only) ? only : undefined);
+  return named ?? (only && stray.length === 0 && !pointsElsewhere(text, only) ? only : undefined);
+}
+
+function removeMatching(
+  session: OrderSession,
+  hit: { item: { id: string; name: string }; temperature: Temperature | null },
+  now: number,
+): TurnResult {
+  const matching = session.lines.filter((line) => {
+    if (line.productId !== hit.item.id) return false;
+    return !hit.temperature || line.temperature === hit.temperature;
+  });
+  const spotlightIds = session.lines.map((candidate) => candidate.productId);
+  if (matching.length === 0) return withCart(session, t(langOf(session), "not_in_order"), now, spotlightIds);
+  let current = session;
+  for (const line of matching) {
+    const removed = apply(current, { type: "remove_line", lineId: line.lineId, now });
+    if (!removed.ok) return withCart(current, t(langOf(current), "cant_remove"), now, spotlightIds);
+    current = removed.session;
+  }
+  const lang = langOf(current);
+  const said = t(lang, "removed_name", { name: hit.item.name });
+  if (current.lines.length === 0) return done(current, `${said} ${t(lang, "cart_empty")}`, [], null);
+  return withCart(current, said, now, []);
+}
+
+/** Spoken cart edits stay on the review. They do not open a menu. */
+function editCartBySpeech(session: OrderSession, text: string, now: number): TurnResult | null {
+  if (parseNavIntent(text)?.kind === "clear_cart") return null;
+  const verb = cartVerb(text);
+  if (!verb || session.lines.length === 0) return null;
+  if (verb === "remove" && mentionsEvery(text)) {
+    const hit = productTarget(text);
+    if (!hit) return null;
+    return removeMatching(session, hit, now);
+  }
+  const line = spokenCartLine(session, text, verb);
   const spotlightIds = session.lines.map((candidate) => candidate.productId);
   if (!line) {
+    const stray = strayWords(session, text);
     const names = session.lines.map((candidate) => getItem(candidate.productId)?.name ?? "that item").join(" or ");
     const say = stray.length > 0 ? t(langOf(session), "not_in_order") : t(langOf(session), "which_item", { names });
     return withCart(session, say, now, spotlightIds);
@@ -412,7 +657,7 @@ function editCartBySpeech(session: OrderSession, text: string, now: number): Tur
     if (!item?.requiresTemperature) return withCart(session, t(langOf(session), "temperature_not_allowed"), now, spotlightIds);
     const saved = apply(session, { type: "set_temperature", lineId: line.lineId, temperature, now });
     if (!saved.ok) return withCart(saved.session, t(langOf(saved.session), "choose_temp"), now, spotlightIds);
-    return withCart(saved.session, `${name} is ${temperature}.`, now, [line.productId]);
+    return withCart(saved.session, t(langOf(saved.session), "is_temp", { name, temperature }), now, [line.productId]);
   }
   if (verb === "more") {
     const spokenTemp = findTemperature(text);
@@ -423,20 +668,23 @@ function editCartBySpeech(session: OrderSession, text: string, now: number): Tur
         return finishIfComplete(added, now);
       }
     }
-    if (line.quantity >= MAX_QUANTITY) return withCart(session, `${name} is already ${MAX_QUANTITY}.`, now, [line.productId]);
+    if (line.quantity >= MAX_QUANTITY) return withCart(session, t(langOf(session), "already_max", { name, max: MAX_QUANTITY }), now, [line.productId]);
     const saved = apply(session, { type: "set_quantity", lineId: line.lineId, quantity: line.quantity + 1, now });
-    if (!saved.ok) return withCart(session, "I can't add another of that.", now, [line.productId]);
-    return withCart(saved.session, `Added one more ${name}.`, now, [line.productId]);
+    if (!saved.ok) return withCart(session, t(langOf(session), "cant_add"), now, [line.productId]);
+    return withCart(saved.session, t(langOf(saved.session), "added_one_more", { name }), now, [line.productId]);
   }
   if (verb === "less" && line.quantity > 1) {
     const saved = apply(session, { type: "set_quantity", lineId: line.lineId, quantity: line.quantity - 1, now });
-    if (!saved.ok) return withCart(session, "I can't remove one of that.", now, [line.productId]);
-    return withCart(saved.session, `Removed one ${name}.`, now, [line.productId]);
+    if (!saved.ok) return withCart(session, t(langOf(session), "cant_less"), now, [line.productId]);
+    return withCart(saved.session, t(langOf(saved.session), "removed_one", { name }), now, [line.productId]);
   }
   const removed = apply(session, { type: "remove_line", lineId: line.lineId, now });
-  if (!removed.ok) return withCart(session, "I can't remove that.", now, spotlightIds);
-  if (removed.session.lines.length === 0) return done(removed.session, `Removed ${name}. The cart is empty.`, [], null);
-  return withCart(removed.session, `Removed ${name}.`, now, []);
+  if (!removed.ok) return withCart(session, t(langOf(session), "cant_remove"), now, spotlightIds);
+  if (removed.session.lines.length === 0) {
+    const lang = langOf(removed.session);
+    return done(removed.session, `${t(lang, "removed_name", { name })} ${t(lang, "cart_empty")}`, [], null);
+  }
+  return withCart(removed.session, t(langOf(removed.session), "removed_name", { name }), now, []);
 }
 
 function withCart(session: OrderSession, say: string, now: number, spotlightIds: string[]): TurnResult {
@@ -666,12 +914,17 @@ function setTemperatures(session: OrderSession, pairs: TempAssignment[], now: nu
   const still = current.lines.filter(needsTemperature);
   if (still.length === 0) return finishIfComplete(last, now);
   const doneLine = pairs
-    .map((pair) => `${getItem(pair.line.productId)?.name ?? "That drink"} is ${pair.temperature}`)
-    .join(". ");
+    .map((pair) =>
+      t(langOf(current), "is_temp", {
+        name: getItem(pair.line.productId)?.name ?? t(langOf(current), "that_item"),
+        temperature: pair.temperature,
+      }),
+    )
+    .join(" ");
   const waiting = still.map((line) => getItem(line.productId)?.name ?? t(langOf(current), "that_item"));
   const listed = waiting.length === 1 ? waiting[0] : `${waiting.slice(0, -1).join(", ")} and ${waiting[waiting.length - 1]}`;
   const key = waiting.length === 1 ? "needs_temp" : "need_temps";
-  return done(current, `${doneLine}. ${t(langOf(current), key, { name: listed, names: listed })}`, [], null);
+  return done(current, `${doneLine} ${t(langOf(current), key, { name: listed, names: listed })}`, [], null);
 }
 
 /** A temperature, when the customer is not also naming a product. "many" means more than one was heard. */

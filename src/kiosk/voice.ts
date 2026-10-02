@@ -4,6 +4,8 @@ export const VOICE_HOLD_MS = 140;
 export const VOICE_PAUSE_MS = 450;
 export const VOICE_MAX_MS = 12_000;
 export const VOICE_GIVE_UP_MS = 6_000;
+/** How long the mic stays closed after playback, so the speaker is not the next order. */
+export const PLAYBACK_TAIL_MS = 900;
 
 /** A short "hot" is sent. A noise spike, and a long silence, are not. */
 export function utteranceReady(voiceMs: number, quietForMs: number, elapsedMs: number): "send" | "drop" | "wait" {

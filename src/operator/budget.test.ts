@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, describe, it } from "node:test";
 import { sharedStoreConfigured } from "../persist/remote";
-import { claimSpeech, resetSpeechBudget, SPEECH_PER_DAY, SPEECH_PER_IP_PER_HOUR, speechClientIp } from "./budget";
+import { claimSpeech, LOGIN_FAILURES, loginBlocked, noteFailedLogin, resetSpeechBudget, SPEECH_PER_DAY, SPEECH_PER_IP_PER_HOUR, speechClientIp } from "./budget";
 
 describe("speech budget", () => {
   const previousUrl = process.env.UPSTASH_REDIS_REST_URL;
@@ -69,6 +69,20 @@ describe("speech budget", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it("locks sign-in after eight wrong passwords from one address", async () => {
+    delete process.env.UPSTASH_REDIS_REST_URL;
+    delete process.env.UPSTASH_REDIS_REST_TOKEN;
+    resetSpeechBudget();
+    const now = Date.parse("2026-10-02T12:00:00.000Z");
+    for (let n = 0; n < LOGIN_FAILURES - 1; n += 1) {
+      assert.equal(await noteFailedLogin("198.51.100.8", now), false);
+    }
+    assert.equal(await loginBlocked("198.51.100.8", now), false);
+    assert.equal(await noteFailedLogin("198.51.100.8", now), true);
+    assert.equal(await loginBlocked("198.51.100.8", now), true);
+    assert.equal(await loginBlocked("198.51.100.9", now), false);
   });
 
   it("reads the platform address ahead of a caller-supplied forwarded header", () => {

@@ -48,7 +48,16 @@ export type PhraseKey =
   | "walked_away"
   | "still_there"
   | "order_ends_in"
-  | "welcome_choose";
+  | "welcome_choose"
+  | "is_temp"
+  | "already_max"
+  | "cant_add"
+  | "added_one_more"
+  | "cant_less"
+  | "removed_one"
+  | "cant_remove"
+  | "removed_name"
+  | "quantity_set";
 
 type Params = Record<string, string | number | undefined>;
 
@@ -101,6 +110,15 @@ const EN: Record<PhraseKey, string> = {
   still_there: "Still there?",
   order_ends_in: "No one in front. This order ends in {time}.",
   welcome_choose: "Welcome. Please make a selection from below.",
+  is_temp: "{name} is {temperature}.",
+  already_max: "{name} is already {max}.",
+  cant_add: "I can't add another of that.",
+  added_one_more: "Added one more {name}.",
+  cant_less: "I can't remove one of that.",
+  removed_one: "Removed one {name}.",
+  cant_remove: "I can't remove that.",
+  removed_name: "Removed {name}.",
+  quantity_set: "{name} is now {quantity}.",
 };
 
 const ES: Record<PhraseKey, string> = {
@@ -152,6 +170,15 @@ const ES: Record<PhraseKey, string> = {
   still_there: "¿Sigues ahí?",
   order_ends_in: "No hay nadie delante. Este pedido termina en {time}.",
   welcome_choose: "Bienvenido. Elige una opción de abajo.",
+  is_temp: "{name} está {temperature}.",
+  already_max: "{name} ya está en {max}.",
+  cant_add: "No puedo añadir otro.",
+  added_one_more: "Añadí uno más de {name}.",
+  cant_less: "No puedo quitar uno.",
+  removed_one: "Quité uno de {name}.",
+  cant_remove: "No puedo quitar eso.",
+  removed_name: "Quité {name}.",
+  quantity_set: "{name} ahora es {quantity}.",
 };
 
 const FR: Record<PhraseKey, string> = {
@@ -203,6 +230,15 @@ const FR: Record<PhraseKey, string> = {
   still_there: "Toujours là ?",
   order_ends_in: "Personne devant la machine. Cette commande se termine dans {time}.",
   welcome_choose: "Bienvenue. Faites un choix parmi les options ci-dessous.",
+  is_temp: "{name} est {temperature}.",
+  already_max: "{name} est déjà à {max}.",
+  cant_add: "Je ne peux pas en ajouter un autre.",
+  added_one_more: "J'en ai ajouté un de plus, {name}.",
+  cant_less: "Je ne peux pas en retirer un.",
+  removed_one: "J'en ai retiré un, {name}.",
+  cant_remove: "Je ne peux pas retirer ça.",
+  removed_name: "J'ai retiré {name}.",
+  quantity_set: "{name} est maintenant {quantity}.",
 };
 
 const HE: Record<PhraseKey, string> = {
@@ -254,6 +290,15 @@ const HE: Record<PhraseKey, string> = {
   still_there: "עדיין כאן?",
   order_ends_in: "אין אף אחד מול המכונה. ההזמנה תסתיים בעוד {time}.",
   welcome_choose: "ברוכים הבאים. בחרו מאפשרויות למטה.",
+  is_temp: "{name} הוא {temperature}.",
+  already_max: "{name} כבר ב-{max}.",
+  cant_add: "אי אפשר להוסיף עוד אחד.",
+  added_one_more: "הוספתי עוד {name}.",
+  cant_less: "אי אפשר להוריד אחד.",
+  removed_one: "הורדתי אחד מ-{name}.",
+  cant_remove: "אי אפשר להסיר את זה.",
+  removed_name: "הסרתי את {name}.",
+  quantity_set: "{name} עכשיו {quantity}.",
 };
 
 const AF: Record<PhraseKey, string> = {
@@ -305,6 +350,15 @@ const AF: Record<PhraseKey, string> = {
   still_there: "Nog daar?",
   order_ends_in: "Niemand voor die masjien. Hierdie bestelling eindig oor {time}.",
   welcome_choose: "Welkom. Kies asseblief uit die opsies hieronder.",
+  is_temp: "{name} is {temperature}.",
+  already_max: "{name} is reeds {max}.",
+  cant_add: "Ek kan nie nog een byvoeg nie.",
+  added_one_more: "Nog een {name} bygevoeg.",
+  cant_less: "Ek kan nie een verwyder nie.",
+  removed_one: "Een {name} verwyder.",
+  cant_remove: "Ek kan dit nie verwyder nie.",
+  removed_name: "{name} verwyder.",
+  quantity_set: "{name} is nou {quantity}.",
 };
 
 const TABLES: Record<AppLanguage, Record<PhraseKey, string>> = {

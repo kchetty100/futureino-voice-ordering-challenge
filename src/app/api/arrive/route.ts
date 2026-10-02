@@ -5,8 +5,8 @@ import { detectLanguage, isAppLanguage, languageFromSttLabel, t, type AppLanguag
 import { claimSpeech, speechBudgetDenied, speechClientIp } from "../../../operator/budget";
 import { beginLobby, noteUsageFor, recordTurn, saveRecord } from "../../../operator/log";
 import { arriveSession } from "../../../session/store";
-import { lineToSpeak } from "../../../speech/line";
-import { synthesize, transcribe } from "../../../speech/openai";
+import { transcribe } from "../../../speech/openai";
+import { issueSpeakTicket } from "../../../speech/ticket";
 
 const MAX_AUDIO_BYTES = 2_000_000;
 const PROMPT = speechPrompt();
@@ -48,15 +48,6 @@ export async function POST(request: Request) {
   if (wake) {
     const lang = pinnedLanguage ?? languageFromSttLabel(sttLanguageLabel) ?? detectLanguage(text) ?? "en";
     const say = wakeSay(text, lang);
-    let audioBase64: string | null = null;
-    if (say && process.env.OPENAI_API_KEY) {
-      try {
-        const playback = await synthesize(say, lang);
-        audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
-      } catch (error) {
-        console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
-      }
-    }
     return Response.json({
       session: null,
       readBack: null,
@@ -66,7 +57,7 @@ export async function POST(request: Request) {
       switchTo: null,
       ui: null,
       transcript: text,
-      audioBase64,
+      speakTicket: issueSpeakTicket(say, null, lang),
     });
   }
 
@@ -80,15 +71,6 @@ export async function POST(request: Request) {
         : ui === "scroll_up" || ui === "scroll_down"
           ? t(lang, "open_menu_first")
           : t(lang, "going_back");
-    let audioBase64: string | null = null;
-    if (process.env.OPENAI_API_KEY) {
-      try {
-        const playback = await synthesize(say, lang);
-        audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
-      } catch (error) {
-        console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
-      }
-    }
     return Response.json({
       session: null,
       readBack: null,
@@ -98,7 +80,7 @@ export async function POST(request: Request) {
       switchTo: null,
       ui,
       transcript: text,
-      audioBase64,
+      speakTicket: issueSpeakTicket(say, null, lang),
     });
   }
 
@@ -119,7 +101,7 @@ export async function POST(request: Request) {
       switchTo: null,
       ui: null,
       transcript: "",
-      audioBase64: null,
+      speakTicket: null,
     });
   }
 
@@ -128,27 +110,17 @@ export async function POST(request: Request) {
     noteUsageFor(arrived.logId, usage);
     await saveRecord(arrived.logId);
   }
-  let audioBase64: string | null = null;
-  const line = lineToSpeak(arrived.say);
-  if (line && process.env.OPENAI_API_KEY) {
-    try {
-      const speakLang =
-        (arrived.session && arrived.session.preferredLanguage) ||
-        languageFromSttLabel(sttLanguageLabel) ||
-        detectLanguage(text) ||
-        "en";
-      const playback = await synthesize(line, speakLang);
-      if (playback) {
-        noteUsageFor(arrived.logId, playback.usage);
-        await saveRecord(arrived.logId);
-      }
-      audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
-    } catch (error) {
-      console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
-    }
-  }
+  const speakLang =
+    (arrived.session && arrived.session.preferredLanguage) ||
+    languageFromSttLabel(sttLanguageLabel) ||
+    detectLanguage(text) ||
+    "en";
   const { logId: _logId, ...response } = arrived;
-  return Response.json({ ...response, transcript: text, audioBase64 });
+  return Response.json({
+    ...response,
+    transcript: text,
+    speakTicket: issueSpeakTicket(arrived.say, arrived.session?.id ?? arrived.logId, speakLang),
+  });
 }
 
 function clipSeconds(form: FormData): number {

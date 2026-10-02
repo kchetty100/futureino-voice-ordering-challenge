@@ -1,7 +1,7 @@
 import { operatorAllowed, operatorConfigured } from "../../operator/access";
 import styles from "./operator.module.css";
 
-export async function Gate({ children, error = false }: { children: React.ReactNode; error?: boolean }) {
+export async function Gate({ children, error }: { children: React.ReactNode; error?: string }) {
   if (!operatorConfigured()) {
     return (
       <main className={styles.page}>
@@ -20,7 +20,8 @@ export async function Gate({ children, error = false }: { children: React.ReactN
           <p className={styles.kicker}>Operator</p>
           <h1>Sign in</h1>
           <p className={styles.sub}>Orders stay on the server. This page is not indexed.</p>
-          {error ? <p className={styles.warn}>That password did not match.</p> : null}
+          {error === "1" ? <p className={styles.warn}>That password did not match.</p> : null}
+          {error === "2" ? <p className={styles.warn}>Too many tries. Wait a little while and try again.</p> : null}
           <label className={styles.field} htmlFor="password">
             Password
           </label>

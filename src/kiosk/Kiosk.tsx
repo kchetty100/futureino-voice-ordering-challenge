@@ -12,8 +12,8 @@ import {
 import { parseNavIntent, type UiCommand } from "../agent/nav";
 import { APP_LANGUAGES, isAppLanguage, t, ui as screenText, type AppLanguage } from "../i18n";
 import { isHeyFuture } from "../agent/arrive";
-import { formatLeaveClock, LEAVE_COUNTDOWN_MS, leaveSecondsLeft } from "./leave";
-import { utteranceReady, VOICE_HOLD_MS } from "./voice";
+import { BLIND_BEFORE_COUNTDOWN_MS, formatLeaveClock, LEAVE_COUNTDOWN_MS, leaveSecondsLeft } from "./leave";
+import { PLAYBACK_TAIL_MS, utteranceReady, VOICE_HOLD_MS } from "./voice";
 import { type WatchStatus } from "./presence";
 import { useSoloKiosk } from "./solo";
 import { useCustomerWatch } from "./watch";
@@ -22,6 +22,20 @@ import styles from "./kiosk.module.css";
 
 type Screen = "attract" | "machines" | "menu" | "review" | "pay";
 type Picker = { productId: string; lineId?: string };
+
+function retargetSay(current: string | null, next: AppLanguage): string | null {
+  if (!current) return current;
+  if (APP_LANGUAGES.some((language) => screenText(language, "hey_future") === current)) {
+    return screenText(next, "hey_future");
+  }
+  if (APP_LANGUAGES.some((language) => t(language, "welcome_choose") === current)) {
+    return t(next, "welcome_choose");
+  }
+  if (APP_LANGUAGES.some((language) => t(language, "didnt_catch") === current)) {
+    return t(next, "didnt_catch");
+  }
+  return current;
+}
 
 const LANGUAGES: { id: AppLanguage; code: string; label: string }[] = [
   { id: "en", code: "EN", label: "English" },
@@ -70,7 +84,7 @@ type ServerState = {
   switchTo?: MachineId | null;
   ui?: UiCommand | null;
   transcript?: string | null;
-  audioBase64?: string | null;
+  speakTicket?: string | null;
 };
 
 export function Kiosk() {
@@ -138,11 +152,46 @@ export function Kiosk() {
     return meterCtx.current;
   }
 
-  async function play(base64: string) {
-    if (!soloRef.current) return;
+  function beginSpeech(state: ServerState, mine: number) {
+    const ticket = state.speakTicket?.trim();
+    const line = (state.say ?? "").trim();
+    if (!ticket || !line || !soloRef.current) {
+      stopPlayback();
+      return;
+    }
     stopPlayback();
     speakingNow.current = true;
     setSpeaking(true);
+    void speakLine(line, ticket, mine);
+  }
+
+  async function speakLine(say: string, ticket: string, mine: number) {
+    try {
+      const response = await fetch("/api/speak", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ say, ticket }),
+      });
+      if (!response.ok || mine !== requestSeq.current || !soloRef.current) {
+        speakingNow.current = false;
+        setSpeaking(false);
+        return;
+      }
+      const bytes = await response.arrayBuffer();
+      if (mine !== requestSeq.current || !soloRef.current) {
+        speakingNow.current = false;
+        setSpeaking(false);
+        return;
+      }
+      await playBytes(bytes);
+    } catch {
+      speakingNow.current = false;
+      setSpeaking(false);
+    }
+  }
+
+  async function playBytes(bytes: ArrayBuffer) {
+    if (!soloRef.current) return;
     try {
       const context = audioContext();
       await context.resume();
@@ -150,8 +199,7 @@ export function Kiosk() {
         stopPlayback();
         return;
       }
-      const binary = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
-      const buffer = await context.decodeAudioData(binary.buffer.slice(0));
+      const buffer = await context.decodeAudioData(bytes.slice(0));
       if (!soloRef.current) {
         stopPlayback();
         return;
@@ -174,8 +222,8 @@ export function Kiosk() {
     }
   }
 
-  async function post(url: string, body: unknown, tick = false): Promise<ServerState | null> {
-    const mine = tick ? requestSeq.current : ++requestSeq.current;
+  async function post(url: string, body: unknown): Promise<ServerState | null> {
+    const mine = ++requestSeq.current;
     const isAudio = body instanceof FormData;
     let response: Response;
     try {
@@ -185,7 +233,7 @@ export function Kiosk() {
         body: isAudio ? body : JSON.stringify(body),
       });
     } catch {
-      if (!tick && mine === requestSeq.current) {
+      if (mine === requestSeq.current) {
         setNotice(screenText(languageRef.current.language, "network"));
       }
       return null;
@@ -198,16 +246,16 @@ export function Kiosk() {
       } catch {
         // The body was not JSON. Keep the connection message.
       }
-      if (!tick && mine === requestSeq.current) setNotice(message);
+      if (mine === requestSeq.current) setNotice(message);
       return null;
     }
     const state = (await response.json()) as ServerState;
     if (mine !== requestSeq.current) return state;
     const transcript = typeof state.transcript === "string" ? state.transcript.trim() : "";
-    const heardNav = !tick ? parseNavIntent(transcript) : null;
-    const ui = !tick ? (state.ui ?? (heardNav?.kind === "ui" ? heardNav.ui : null)) : null;
+    const heardNav = parseNavIntent(transcript);
+    const ui = state.ui ?? (heardNav?.kind === "ui" ? heardNav.ui : null);
     const goingBack = ui === "go_back";
-    if (!tick && screenRef.current === "attract") {
+    if (screenRef.current === "attract") {
       setHeard(transcript || null);
       setNotice(null);
       setSpotlightIds([]);
@@ -239,18 +287,17 @@ export function Kiosk() {
         setHeard(null);
         setSay(state.say ?? t(languageRef.current.language, "welcome_choose"));
         show("machines");
-        if (state.audioBase64) void play(state.audioBase64);
-        else stopPlayback();
+        beginSpeech(state, mine);
         return state;
       }
       setSay(transcript ? screenText(languageRef.current.language, "hey_future") : state.say ?? screenText(languageRef.current.language, "hey_future"));
       return state;
     }
     const nextSession = state.session;
-    if (nextSession && !isNewerSession(nextSession, tick)) return state;
+    if (nextSession && !isNewerSession(nextSession)) return state;
     const movedBack = goingBack ? retreat() : false;
     if (!goingBack) sheetBack.current = false;
-    if (!tick && !goingBack) {
+    if (!goingBack) {
       if (ui && nextSession) {
         setShowMenu(true);
         show("menu");
@@ -269,13 +316,6 @@ export function Kiosk() {
         show("menu");
       }
     }
-    if (tick) {
-      if (nextSession && liveSessionId.current === nextSession.id) {
-        setSession(nextSession);
-        setReadBack(state.readBack);
-      }
-      return state;
-    }
     if (nextSession) {
       liveSessionId.current = nextSession.id;
       setSession(nextSession);
@@ -290,19 +330,9 @@ export function Kiosk() {
     setSay(goingBack && !movedBack ? screenText(languageRef.current.language, "home_screen") : state.say);
     setSpotlightIds(state.spotlightIds);
     setHeard(typeof state.transcript === "string" && state.transcript ? state.transcript : null);
-    if (state.audioBase64) void play(state.audioBase64);
-    else stopPlayback();
+    beginSpeech(state, mine);
     return state;
   }
-
-  useEffect(() => {
-    if (!session || session.phase === "abandoned") return;
-    const id = session.id;
-    const timer = window.setInterval(() => {
-      void post(`/api/sessions/${id}`, { type: "tick" }, true);
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [session?.id, session?.phase]);
 
   useEffect(() => {
     if (session?.phase !== "abandoned") return;
@@ -322,9 +352,8 @@ export function Kiosk() {
     stopPlayback();
   }, [session]);
 
-  function isNewerSession(next: OrderSession, tick: boolean): boolean {
+  function isNewerSession(next: OrderSession): boolean {
     if (liveSessionId.current && next.id !== liveSessionId.current) return false;
-    if (!liveSessionId.current && tick) return false;
     if (next.lastActivityAt < seenActivity.current || next.cartVersion < seenCart.current) return false;
     seenActivity.current = next.lastActivityAt;
     seenCart.current = next.cartVersion;
@@ -391,8 +420,15 @@ export function Kiosk() {
     setLanguage(next);
     setLanguagePinned(true);
     setLanguageOpen(false);
+    setSay((current) => retargetSay(current, next));
     const live = session && session.phase !== "abandoned" ? session : null;
-    if (live) void post(`/api/sessions/${live.id}/language`, { language: next });
+    if (live) {
+      void fetch(`/api/sessions/${live.id}/language`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ language: next }),
+      });
+    }
   }
 
   function cancel() {
@@ -469,20 +505,22 @@ export function Kiosk() {
   }, [watch.present, leading]);
 
   const orderOpen = Boolean(session && session.phase !== "abandoned");
-  const cameraAway = screen !== "attract" && watch.status === "looking";
+  const faceAway = screen !== "attract" && watch.status === "looking";
+  const cameraBlind = screen !== "attract" && watch.status !== "looking" && watch.status !== "seen";
+  const activityAt = session?.lastActivityAt ?? 0;
 
   useEffect(() => {
-    if (!cameraAway) {
+    if (!faceAway && !cameraBlind) {
       awayAt.current = null;
       endingVisit.current = false;
       setLeaveSeconds(null);
       return;
     }
-    if (awayAt.current == null) awayAt.current = Date.now();
+    if (!faceAway) awayAt.current = null;
+    else if (awayAt.current == null) awayAt.current = Date.now();
     const timer = window.setInterval(() => {
-      const started = awayAt.current;
-      if (started == null) return;
-      const left = leaveSecondsLeft(Date.now() - started);
+      const elapsed = faceAway ? Date.now() - (awayAt.current ?? Date.now()) : Date.now() - activityAt;
+      const left = faceAway ? leaveSecondsLeft(elapsed) : leaveSecondsLeft(elapsed, BLIND_BEFORE_COUNTDOWN_MS);
       setLeaveSeconds(left);
       if (left === 0 && orderOpen && !endingVisit.current && liveSessionId.current) {
         endingVisit.current = true;
@@ -490,7 +528,7 @@ export function Kiosk() {
       }
     }, 250);
     return () => window.clearInterval(timer);
-  }, [cameraAway, orderOpen, screen]);
+  }, [faceAway, cameraBlind, orderOpen, screen, activityAt]);
 
   function onTalk() {
     watch.enable();
@@ -1449,7 +1487,7 @@ function useConversation(opts: {
       while (live.current && optsRef.current.isSpeaking()) {
         await wait(80);
       }
-      if (live.current) await wait(400);
+      if (live.current) await wait(PLAYBACK_TAIL_MS);
     }
     if (!live.current) setPhase("off");
   }

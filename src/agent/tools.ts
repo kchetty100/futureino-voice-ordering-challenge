@@ -1,5 +1,6 @@
 import {
   aliasesFor,
+  CATALOG,
   getItem,
   itemsForMachine,
   type CatalogItem,
@@ -126,7 +127,7 @@ export function isClearYes(text: string): boolean {
 
 /** A reply that accepts the order and also changes it is not a confirmation. */
 export function changesOrder(text: string): boolean {
-  return /\b(but|except|change|make|add|remove|removed|delete|deleted|without|instead|another|also|too|hot|iced|ice|cold|room|no|not)\b/.test(spokenWords(text))
+  return /\b(but|except|change|make|add|remove|removed|delete|deleted|without|instead|another|also|too|hot|iced|ice|cold|room|no|not|wrong|incorrect)\b/.test(spokenWords(text))
     || /\btake\b.*\b(off|out|away)\b/.test(spokenWords(text))
     || /\bget\b.*\brid\b/.test(spokenWords(text));
 }
@@ -145,9 +146,16 @@ export function wantsNoMore(text: string): boolean {
 
 /** The reply asks to change the order, not merely to stop adding. */
 export function wantsChange(text: string): boolean {
-  return /\b(change|make|add|remove|removed|delete|deleted|but|instead|hot|iced|ice|cold|room|not)\b/.test(spokenWords(text))
+  return /\b(change|make|add|remove|removed|delete|deleted|but|instead|hot|iced|ice|cold|room|not|wrong|incorrect)\b/.test(spokenWords(text))
     || /\btake\b.*\b(off|out|away)\b/.test(spokenWords(text))
     || /\bget\b.*\brid\b/.test(spokenWords(text));
+}
+
+/** They are rejecting the order as read, without naming a replacement. */
+export function wantsCorrection(text: string): boolean {
+  const normalized = spokenWords(text);
+  if (/^(wait|hold on|not quite)$/.test(normalized)) return true;
+  return /\b(wrong|incorrect|mistake)\b/.test(normalized) || /\bnot right\b/.test(normalized) || /\bhold on\b/.test(normalized);
 }
 
 function spokenWords(text: string): string {
@@ -160,6 +168,9 @@ function spokenWords(text: string): string {
     .trim();
 }
 
+const ALLERGEN_INGREDIENT =
+  /\b(nut|nuts|dairy|gluten|milk|peanut|peanuts|lactose|soy|egg|eggs|wheat|sesame|shellfish|nueces|cacahuete|lait|glúten|leche|lactosa)\b/i;
+
 export function asksAllergens(text: string): boolean {
   const normalized = text.toLowerCase();
   if (
@@ -168,10 +179,8 @@ export function asksAllergens(text: string): boolean {
   ) {
     return true;
   }
-  return (
-    /\b(contain|contains|safe|contiene|contient|bevat|tiene)\b/i.test(normalized) &&
-    /\b(nut|nuts|dairy|gluten|milk|peanut|peanuts|nueces|cacahuete|lait|glúten|al[eé]rgeno[s]?)\b/i.test(normalized)
-  );
+  if (!ALLERGEN_INGREDIENT.test(normalized)) return false;
+  return /\b(contain|contains|containing|safe|free|contiene|contient|bevat|tiene|libre|sans|vry|have|has|got)\b/i.test(normalized);
 }
 
 function effect(result: ApplyResult, say: string, spotlightIds: string[], ok = result.ok): ToolEffect {
@@ -237,6 +246,42 @@ function scoreItem(item: CatalogItem, query: string, tokens: string[]): number {
   }
   if (query.trim().toLowerCase() === name) score += 2;
   return Math.max(score, itemScore(item, query));
+}
+
+/**
+ * The product was the thing they said.
+ * Every content word has to belong to that name, so a latte mentioned in passing does not count.
+ */
+export function productMentioned(text: string, productId: string): boolean {
+  const item = getItem(productId);
+  if (!item) return false;
+  const tokens = queryTokens(text).filter((token) => token.length >= 4 && !ORDER_FILLER.has(token));
+  if (tokens.length === 0 || tokens.length > 6) return false;
+  return tokens.every((token) => mentionsWord(token, nameWords(item)));
+}
+
+/** True when any content word is a menu name, even inside a longer sentence. */
+export function namesAProduct(text: string): boolean {
+  const tokens = queryTokens(text).filter((token) => token.length >= 4);
+  return tokens.some((token) => CATALOG.some((item) => mentionsWord(token, nameWords(item))));
+}
+
+function nameWords(item: CatalogItem): Set<string> {
+  return new Set(
+    [item.name, ...aliasesFor(item.id)]
+      .join(" ")
+      .toLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((word) => word.length >= 4),
+  );
+}
+
+const ORDER_FILLER = new Set(["another", "more", "extra", "couple", "pair", "second", "third", "again", "also"]);
+
+function mentionsWord(token: string, words: Set<string>): boolean {
+  if (words.has(token) || [...words].some((word) => sameSound(token, word))) return true;
+  if (token.endsWith("s") && token.length > 4) return mentionsWord(token.slice(0, -1), words);
+  return false;
 }
 
 /** Name, customer phrase, or a taste word. A taste word stays below a precise name. */

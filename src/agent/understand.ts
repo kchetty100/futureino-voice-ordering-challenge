@@ -7,13 +7,16 @@ import { machineIntro } from "./arrive";
 import { finishIfComplete, type TurnResult } from "./rules";
 import { runTool, type ToolEffect } from "./tools";
 
+export type HeardAction = "add" | "clarify" | "menu" | "none" | "clear" | "remove" | "set_quantity" | "set_temperature";
+
 export type HeardLine = {
   productId: string;
   temperature: Temperature | null;
+  quantity?: number | null;
 };
 
 export type Heard = {
-  action: "add" | "clarify" | "menu" | "none";
+  action: HeardAction;
   lines: HeardLine[];
   choices: string[];
   menu: MachineId | null;
@@ -27,12 +30,17 @@ const MENU = CATALOG.map((item) => {
 }).join("\n");
 
 const PROMPT = [
-  "Map the customer's sentence onto this menu. Return JSON only.",
-  "action add: one clear product per line they asked for. Use a real productId from the menu.",
+  "Map the customer's sentence onto this menu and the cart. Return JSON only.",
+  "action add: one clear product per line they asked for. Use a real productId from the menu. quantity is how many they asked for, or 1.",
+  "action remove: take named products out of the cart. Put those productIds in lines. This is not a yes.",
+  "action clear: empty the whole cart. remove everything, start over, scratch that, get rid of all of it.",
+  "action set_quantity: set one cart line to the spoken count, from 1 to 9.",
+  "action set_temperature: set hot, iced, or room on a drink already in the cart.",
   "action clarify: two or more products fit and you cannot tell which. Put those ids in choices. Do not add.",
   "action menu: they asked to see coffee or snacks, without naming one product.",
-  "action none: nothing on the menu fits. Leave lines and choices empty.",
+  "action none: nothing on the menu fits, or the request is not a cart change. Leave lines and choices empty.",
   "temperature is hot, iced, or room only when they said it and the item needs a temperature. Otherwise none.",
+  "quantity is 0 when they did not say a count.",
   "Never confirm an order. Never invent a product id. Allergens are unknown. Do not guess ingredients.",
   `Menu:\n${MENU}`,
 ].join("\n");
@@ -42,7 +50,18 @@ export function parseHeard(value: unknown): Heard | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
   const action = raw.action;
-  if (action !== "add" && action !== "clarify" && action !== "menu" && action !== "none") return null;
+  if (
+    action !== "add" &&
+    action !== "clarify" &&
+    action !== "menu" &&
+    action !== "none" &&
+    action !== "clear" &&
+    action !== "remove" &&
+    action !== "set_quantity" &&
+    action !== "set_temperature"
+  ) {
+    return null;
+  }
   const lines = Array.isArray(raw.lines) ? raw.lines.flatMap(readLine) : [];
   const choices = Array.isArray(raw.choices) ? raw.choices.filter((id): id is string => typeof id === "string" && Boolean(getItem(id))) : [];
   const menu = raw.menu === "coffee" || raw.menu === "snacks" ? raw.menu : null;
@@ -52,6 +71,15 @@ export function parseHeard(value: unknown): Heard | null {
 /** Apply a mapped sentence. Returns null when there is nothing safe to do. */
 export function applyHeard(session: OrderSession, heard: Heard, now: number): TurnResult | null {
   if (heard.action === "none") return null;
+  if (heard.action === "clear") {
+    const hadItems = session.lines.length > 0;
+    const result = apply(session, { type: "clear", now });
+    const say = hadItems ? t(langOf(result.session), "cart_cleared") : t(langOf(result.session), "cart_empty");
+    return reply(result.session, say);
+  }
+  if (heard.action === "remove") return removeHeard(session, heard, now);
+  if (heard.action === "set_quantity") return quantityHeard(session, heard, now);
+  if (heard.action === "set_temperature") return temperatureHeard(session, heard, now);
   if (heard.action === "menu" && heard.menu) {
     const opening = heard.menu !== session.machineId;
     const intro = machineIntro(heard.menu, langOf(session));
@@ -83,7 +111,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
     const shown = items.slice(0, 3);
     return {
       session: stayed.session,
-      say: `I can offer ${shown.map((item) => item.name).join(", ")}.`,
+      say: t(langOf(stayed.session), "can_offer", { names: shown.map((item) => item.name).join(", ") }),
       spotlightIds: shown.map((item) => item.id),
       readBack: null,
       switchTo: null,
@@ -121,10 +149,11 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
     const item = getItem(line.productId);
     if (!item) continue;
     const temperature = line.temperature && item.requiresTemperature ? line.temperature : undefined;
+    const quantity = line.quantity && line.quantity > 1 ? line.quantity : undefined;
     const added = runTool(
       current,
       "add_to_cart",
-      { productId: item.id, ...(temperature ? { temperature } : {}) },
+      { productId: item.id, ...(quantity ? { quantity } : {}), ...(temperature ? { temperature } : {}) },
       now,
     );
     if (!added.ok) {
@@ -169,7 +198,10 @@ export async function understandUtterance(session: OrderSession, text: string): 
             type: "object",
             additionalProperties: false,
             properties: {
-              action: { type: "string", enum: ["add", "clarify", "menu", "none"] },
+              action: {
+                type: "string",
+                enum: ["add", "clarify", "menu", "none", "clear", "remove", "set_quantity", "set_temperature"],
+              },
               lines: {
                 type: "array",
                 items: {
@@ -178,8 +210,9 @@ export async function understandUtterance(session: OrderSession, text: string): 
                   properties: {
                     productId: { type: "string" },
                     temperature: { type: "string", enum: ["hot", "iced", "room", "none"] },
+                    quantity: { type: "integer" },
                   },
-                  required: ["productId", "temperature"],
+                  required: ["productId", "temperature", "quantity"],
                 },
               },
               choices: { type: "array", items: { type: "string" } },
@@ -210,5 +243,49 @@ function readLine(value: unknown): HeardLine[] {
   const raw = value as Record<string, unknown>;
   if (typeof raw.productId !== "string" || !getItem(raw.productId)) return [];
   const temperature = raw.temperature === "hot" || raw.temperature === "iced" || raw.temperature === "room" ? raw.temperature : null;
-  return [{ productId: raw.productId, temperature }];
+  const quantity = typeof raw.quantity === "number" && raw.quantity >= 1 && raw.quantity <= 9 ? raw.quantity : null;
+  return [{ productId: raw.productId, temperature, quantity }];
+}
+
+function reply(session: OrderSession, say: string, spotlightIds: string[] = []): TurnResult {
+  return { session, say, spotlightIds, readBack: null, switchTo: null, ui: null };
+}
+
+function removeHeard(session: OrderSession, heard: Heard, now: number): TurnResult | null {
+  const ids = new Set(heard.lines.map((line) => line.productId));
+  const matching = session.lines.filter((line) => ids.has(line.productId));
+  if (matching.length === 0) return null;
+  let current = session;
+  for (const line of matching) {
+    const removed = apply(current, { type: "remove_line", lineId: line.lineId, now });
+    if (!removed.ok) return null;
+    current = removed.session;
+  }
+  const names = [...ids].map((id) => getItem(id)?.name).filter((name): name is string => Boolean(name));
+  const said = names.length === 1 ? t(langOf(current), "removed_name", { name: names[0] }) : t(langOf(current), "removed");
+  if (current.lines.length === 0) return reply(current, `${said} ${t(langOf(current), "cart_empty")}`.trim());
+  return reply(current, said, [...ids]);
+}
+
+function quantityHeard(session: OrderSession, heard: Heard, now: number): TurnResult | null {
+  const spec = heard.lines[0];
+  if (!spec?.quantity) return null;
+  const line = session.lines.find((candidate) => candidate.productId === spec.productId && (!spec.temperature || candidate.temperature === spec.temperature));
+  if (!line) return null;
+  const saved = apply(session, { type: "set_quantity", lineId: line.lineId, quantity: spec.quantity, now });
+  if (!saved.ok) return null;
+  const name = getItem(line.productId)?.name ?? t(langOf(saved.session), "that_item");
+  return reply(saved.session, t(langOf(saved.session), "quantity_set", { name, quantity: spec.quantity }), [line.productId]);
+}
+
+function temperatureHeard(session: OrderSession, heard: Heard, now: number): TurnResult | null {
+  const spec = heard.lines[0];
+  if (!spec?.temperature) return null;
+  const item = getItem(spec.productId);
+  if (!item?.requiresTemperature) return null;
+  const line = session.lines.find((candidate) => candidate.productId === spec.productId);
+  if (!line) return null;
+  const saved = apply(session, { type: "set_temperature", lineId: line.lineId, temperature: spec.temperature, now });
+  if (!saved.ok) return null;
+  return reply(saved.session, t(langOf(saved.session), "is_temp", { name: item.name, temperature: spec.temperature }), [item.id]);
 }

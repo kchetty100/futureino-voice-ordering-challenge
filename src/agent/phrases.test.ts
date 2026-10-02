@@ -94,7 +94,22 @@ describe("customer phrases", () => {
     assert.match(choice?.say ?? "", /Americano/);
     assert.match(choice?.say ?? "", /Daily Black/);
 
-    const invented = applyHeard(coffee(), { action: "add", lines: [], choices: [], menu: null }, 4);
+    const drafted = answerWithRules(coffee(), "iced latte and potato chips", 4);
+    const cleared = applyHeard(drafted.session, { action: "clear", lines: [], choices: [], menu: null }, 5);
+    assert.equal(cleared?.session.lines.length, 0);
+    assert.equal(cleared?.say, "Cart cleared.");
+    const removed = applyHeard(drafted.session, { action: "remove", lines: [{ productId: "coffee-04", temperature: null }], choices: [], menu: null }, 6);
+    assert.equal(removed?.session.lines.length, 1);
+    assert.equal(removed?.session.lines[0]?.productId, "snacks-19");
+    const counted = applyHeard(
+      drafted.session,
+      { action: "set_quantity", lines: [{ productId: "snacks-19", temperature: null, quantity: 3 }], choices: [], menu: null },
+      7,
+    );
+    assert.equal(counted?.session.lines.find((line) => line.productId === "snacks-19")?.quantity, 3);
+    assert.match(counted?.say ?? "", /Potato Chips is now 3/);
+
+    const invented = applyHeard(coffee(), { action: "add", lines: [], choices: [], menu: null }, 8);
     assert.equal(invented, null);
     const none = applyHeard(coffee(), { action: "none", lines: [], choices: [], menu: null }, 5);
     assert.equal(none, null);
@@ -121,7 +136,18 @@ describe("navigation phrases", () => {
     for (const phrase of ["clear cart", "empty cart", "clear the order"]) {
       assert.deepEqual(parseNavIntent(phrase), { kind: "clear_cart" });
     }
+    for (const phrase of [
+      "remove everything from the cart",
+      "remove all of it",
+      "delete everything",
+      "start over",
+      "scratch that",
+      "get rid of all of it",
+    ]) {
+      assert.deepEqual(parseNavIntent(phrase), { kind: "clear_cart" }, phrase);
+    }
     assert.equal(parseNavIntent("remove the latte"), null);
+    assert.equal(parseNavIntent("remove all the lattes"), null);
     assert.equal(parseNavIntent("iced latte"), null);
 
     assert.equal(requestedMachine("return to coffee screen"), "coffee");
@@ -154,6 +180,10 @@ describe("navigation phrases", () => {
 
     const coffeeScreen = answerWithRules(drafted.session, "coffee machine", 5);
     assert.equal(coffeeScreen.switchTo, "coffee");
+
+    const wiped = answerWithRules(drafted.session, "remove everything from the cart", 6);
+    assert.equal(wiped.session.lines.length, 0);
+    assert.equal(wiped.say, "Cart cleared.");
 
     const cleared = answerWithRules(drafted.session, "clear cart", 6);
     assert.equal(cleared.session.lines.length, 0);

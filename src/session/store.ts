@@ -170,6 +170,10 @@ export async function assignLanguage(id: string, language: AppLanguage, now = Da
 }
 
 export async function commandSession(id: string, command: OrderInput, now = Date.now()): Promise<SessionResponse | null> {
+  if (command.type === "tick") {
+    const held = await recallSession(id);
+    return held ? snapshot(held) : null;
+  }
   return enqueue(id, (held) => {
     const before = held.session;
     const result = apply(held.session, { ...command, now });
@@ -190,14 +194,6 @@ export async function commandSession(id: string, command: OrderInput, now = Date
         source: "touch",
         customer: label,
         say: result.ok ? null : noticeFor(result.session, result.reason ?? "cart_empty"),
-      });
-    }
-    if (command.type === "tick" && before.phase !== "abandoned" && result.session.phase === "abandoned") {
-      recordTurn(id, {
-        at: now,
-        source: "system",
-        customer: null,
-        say: t(langOf(before), "walked_away"),
       });
     }
     recordState(id, result.session, now);

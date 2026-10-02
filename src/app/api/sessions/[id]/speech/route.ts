@@ -1,10 +1,11 @@
 import { getItem, isPromptEcho, speechPrompt } from "../../../../../catalog/index";
 import { isAppLanguage, langOf, languageFromSttLabel, t } from "../../../../../i18n";
 import { claimSpeech, speechBudgetDenied, speechClientIp } from "../../../../../operator/budget";
-import { loadRecord, noteUsageFor, recordTurn, saveRecord } from "../../../../../operator/log";
+import { lastSpokenSay, loadRecord, noteUsageFor, recordTurn, saveRecord } from "../../../../../operator/log";
 import { assignLanguage, commandSession, messageSession, recallLanguage, sessionMachine } from "../../../../../session/store";
-import { lineToSpeak } from "../../../../../speech/line";
-import { synthesize, transcribe } from "../../../../../speech/openai";
+import { isPlaybackEcho, lineToSpeak } from "../../../../../speech/line";
+import { transcribe } from "../../../../../speech/openai";
+import { issueSpeakTicket } from "../../../../../speech/ticket";
 
 const MAX_AUDIO_BYTES = 2_000_000;
 
@@ -45,6 +46,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
   await loadRecord(id);
   noteUsageFor(id, usage);
+  if (transcript && isPlaybackEcho(transcript, lastSpokenSay(id))) {
+    const quiet = await commandSession(id, { type: "activity" });
+    if (!quiet) return Response.json({ error: "Unknown session." }, { status: 404 });
+    await saveRecord(id);
+    return Response.json({ ...quiet, say: lastSpokenSay(id), transcript: "", speakTicket: null });
+  }
   if (!transcript) {
     const quiet = await commandSession(id, { type: "activity" });
     if (!quiet) return Response.json({ error: "Unknown session." }, { status: 404 });
@@ -61,30 +68,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         : t(lang, names.length === 1 ? "needs_temp" : "need_temps", { name: listed, names: listed });
     recordTurn(id, { at: Date.now(), source: "voice", customer: null, say: miss });
     await saveRecord(id);
-    return Response.json({ ...quiet, say: miss, transcript: "", audioBase64: null });
+    return Response.json({ ...quiet, say: miss, transcript: "", speakTicket: null });
   }
 
   await saveRecord(id);
   const response = await messageSession(id, transcript, Date.now(), "voice", sttLanguageLabel);
   if (!response) return Response.json({ error: "Unknown session." }, { status: 404 });
 
-  let audioBase64: string | null = null;
-  const line = lineToSpeak(response.say);
-  if (line) {
-    try {
-      const speakLang = response.session ? langOf(response.session) : knownLanguage?.preferredLanguage;
-      const spoken = await synthesize(line, speakLang);
-      if (spoken) {
-        noteUsageFor(id, spoken.usage);
-        await saveRecord(id);
-      }
-      audioBase64 = spoken ? Buffer.from(spoken.bytes).toString("base64") : null;
-    } catch (error) {
-      console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
-    }
-  }
-
-  return Response.json({ ...response, transcript, audioBase64 });
+  const speakLang = response.session ? langOf(response.session) : knownLanguage?.preferredLanguage;
+  const speakTicket = issueSpeakTicket(lineToSpeak(response.say), id, speakLang ?? null);
+  return Response.json({ ...response, transcript, speakTicket });
 }
 
 function clipSeconds(form: FormData): number {

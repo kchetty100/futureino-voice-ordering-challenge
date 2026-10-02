@@ -28,6 +28,7 @@ export default async function EnterPage({ searchParams }: { searchParams: Promis
         <h1>This machine is locked</h1>
         <p className={styles.sub}>Enter the password to use the machine.</p>
         {query.error === "1" ? <p className={styles.warn}>That password did not match.</p> : null}
+        {query.error === "2" ? <p className={styles.warn}>Too many tries. Wait a little while and try again.</p> : null}
         <input type="hidden" name="next" value={next} />
         <label className={styles.field} htmlFor="password">
           Password

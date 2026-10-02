@@ -62,7 +62,18 @@ export function clearCartCue(normalized: string): boolean {
   ) {
     return true;
   }
-  return /^(clear|empty|vaciar|vider)( (it|everything|all|todo|tout))?$/.test(normalized);
+  if (/^(clear|empty|vaciar|vider)( (it|everything|all|todo|tout))?$/.test(normalized)) return true;
+  if (/\b(start over|start again|scratch that|scratch this|scratch the order)\b/.test(normalized)) return true;
+  if (/\b(forget everything|forget the order|forget this order|cancel everything)\b/.test(normalized)) return true;
+  if (/\b(quita|quitar|borra|borrar|enlever|efface|verwyder)\b/.test(normalized) && /\b(todo|tout|alles)\b/.test(normalized)) {
+    return true;
+  }
+  return (
+    /\b(remove|removed|delete|deleted|clear|empty|wipe|get rid of)\b/.test(normalized) &&
+    /\b(everything|every item|the whole cart|the whole order|whole cart|whole order|it all|all of it|all of them|all of this|all of these)\b/.test(
+      normalized,
+    )
+  ) || /^(please )?(remove|delete|clear|empty) all$/.test(normalized);
 }
 
 export function scrollUpCue(normalized: string): boolean {

@@ -16,7 +16,7 @@ export const metadata: Metadata = {
 export default async function OperatorPage({ searchParams }: { searchParams: Promise<{ error?: string }> }) {
   const query = await searchParams;
   return (
-    <Gate error={query.error === "1"}>
+    <Gate error={query.error}>
       <Shell>
         <header className={styles.top}>
           <div>
