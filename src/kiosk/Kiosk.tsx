@@ -236,8 +236,11 @@ export function Kiosk() {
         return state;
       }
       if (isHeyFuture(transcript)) {
-        setSay(null);
+        setHeard(null);
+        setSay(state.say ?? t(languageRef.current.language, "welcome_choose"));
         show("machines");
+        if (state.audioBase64) void play(state.audioBase64);
+        else stopPlayback();
         return state;
       }
       setSay(transcript ? screenText(languageRef.current.language, "hey_future") : state.say ?? screenText(languageRef.current.language, "hey_future"));

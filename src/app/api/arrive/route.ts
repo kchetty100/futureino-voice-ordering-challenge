@@ -1,3 +1,4 @@
+import { wakeSay } from "../../../agent/arrive";
 import { parseNavIntent } from "../../../agent/nav";
 import { isPromptEcho, speechPrompt } from "../../../catalog/index";
 import { detectLanguage, isAppLanguage, languageFromSttLabel, t, type AppLanguage } from "../../../i18n";
@@ -45,16 +46,27 @@ export async function POST(request: Request) {
   }
 
   if (wake) {
+    const lang = pinnedLanguage ?? languageFromSttLabel(sttLanguageLabel) ?? detectLanguage(text) ?? "en";
+    const say = wakeSay(text, lang);
+    let audioBase64: string | null = null;
+    if (say && process.env.OPENAI_API_KEY) {
+      try {
+        const playback = await synthesize(say, lang);
+        audioBase64 = playback ? Buffer.from(playback.bytes).toString("base64") : null;
+      } catch (error) {
+        console.error("Speech playback failed.", error instanceof Error ? error.message : "unknown error");
+      }
+    }
     return Response.json({
       session: null,
       readBack: null,
-      say: text ? null : t(pinnedLanguage, "didnt_catch"),
+      say,
       notice: null,
       spotlightIds: [],
       switchTo: null,
       ui: null,
       transcript: text,
-      audioBase64: null,
+      audioBase64,
     });
   }
 

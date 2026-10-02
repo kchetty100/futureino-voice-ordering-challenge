@@ -35,6 +35,13 @@ export function isHeyFuture(text: string): boolean {
   return /\b(hey|hay|hi)\s+(future|futuer|fewcher|futcher)\b/.test(normalized);
 }
 
+/** What the home screen says after a wake clip. Hey Future opens the machines. */
+export function wakeSay(text: string, language: AppLanguage): string | null {
+  if (isHeyFuture(text)) return t(language, "welcome_choose");
+  if (!text.trim()) return t(language, "didnt_catch");
+  return null;
+}
+
 /** Which machine a first-screen utterance belongs to. Null means ask them to choose. */
 export function machineForUtterance(text: string): MachineId | null {
   const asked = requestedMachine(text);

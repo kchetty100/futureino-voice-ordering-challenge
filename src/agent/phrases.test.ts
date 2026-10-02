@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { isPromptEcho, speechPrompt } from "../catalog/index";
 import { createSession, type OrderSession } from "../order/engine";
-import { isHeyFuture, requestedMachine } from "./arrive";
+import { isHeyFuture, requestedMachine, wakeSay } from "./arrive";
 import { parseNavIntent } from "./nav";
 import { answerWithRules } from "./rules";
 import { applyHeard, parseHeard } from "./understand";
@@ -41,6 +41,9 @@ describe("customer phrases", () => {
     assert.equal(isHeyFuture("future"), false);
     assert.equal(isHeyFuture("hey"), false);
     assert.equal(isHeyFuture("iced latte"), false);
+    assert.equal(wakeSay("Hey Future", "en"), "Welcome. Please make a selection from below.");
+    assert.equal(wakeSay("latte", "en"), null);
+    assert.match(wakeSay("", "es") ?? "", /escuch/);
   });
 
   it("gives the transcriber every name and customer phrase", () => {

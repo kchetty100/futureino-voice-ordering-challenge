@@ -479,3 +479,13 @@ Cost uses the published token rates. `gpt-4o-mini` and `gpt-4o-mini-transcribe` 
 **Why:** A customer who taps Español should see Español on the machine, not only hear it.
 
 **How we checked:** `ui` in `src/i18n/language.test.ts`. On the welcome screen, Español changes Welcome to Bienvenido and the start line to Spanish.
+
+## 2026-10-02 — Hey Future welcomes them onto the machines
+
+**Decided:** After "Hey Future" on the home screen, the machine says "Welcome. Please make a selection from below." The same line is on the machine screen. A chosen language uses that language's line. Any other words on the home screen still ask them to say Hey Future.
+
+**Alternatives:** Stay silent and only show the two machines. Say the line when they tap Browse as well.
+
+**Why:** The wake phrase should hand them to the choice, out loud, and the screen should match.
+
+**How we checked:** `wakeSay` in `src/agent/phrases.test.ts`.

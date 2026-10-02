@@ -47,7 +47,8 @@ export type PhraseKey =
   | "stale_cart"
   | "walked_away"
   | "still_there"
-  | "order_ends_in";
+  | "order_ends_in"
+  | "welcome_choose";
 
 type Params = Record<string, string | number | undefined>;
 
@@ -99,6 +100,7 @@ const EN: Record<PhraseKey, string> = {
   walked_away: "The customer walked away. The cart was cleared.",
   still_there: "Still there?",
   order_ends_in: "No one in front. This order ends in {time}.",
+  welcome_choose: "Welcome. Please make a selection from below.",
 };
 
 const ES: Record<PhraseKey, string> = {
@@ -149,6 +151,7 @@ const ES: Record<PhraseKey, string> = {
   walked_away: "El cliente se fue. Se vació el carrito.",
   still_there: "¿Sigues ahí?",
   order_ends_in: "No hay nadie delante. Este pedido termina en {time}.",
+  welcome_choose: "Bienvenido. Elige una opción de abajo.",
 };
 
 const FR: Record<PhraseKey, string> = {
@@ -199,6 +202,7 @@ const FR: Record<PhraseKey, string> = {
   walked_away: "Le client est parti. Le panier a été vidé.",
   still_there: "Toujours là ?",
   order_ends_in: "Personne devant la machine. Cette commande se termine dans {time}.",
+  welcome_choose: "Bienvenue. Faites un choix parmi les options ci-dessous.",
 };
 
 const HE: Record<PhraseKey, string> = {
@@ -249,6 +253,7 @@ const HE: Record<PhraseKey, string> = {
   walked_away: "הלקוח הלך. העגלה רוקנה.",
   still_there: "עדיין כאן?",
   order_ends_in: "אין אף אחד מול המכונה. ההזמנה תסתיים בעוד {time}.",
+  welcome_choose: "ברוכים הבאים. בחרו מאפשרויות למטה.",
 };
 
 const AF: Record<PhraseKey, string> = {
@@ -299,6 +304,7 @@ const AF: Record<PhraseKey, string> = {
   walked_away: "Die kliënt het weggeloop. Die mandjie is skoongemaak.",
   still_there: "Nog daar?",
   order_ends_in: "Niemand voor die masjien. Hierdie bestelling eindig oor {time}.",
+  welcome_choose: "Welkom. Kies asseblief uit die opsies hieronder.",
 };
 
 const TABLES: Record<AppLanguage, Record<PhraseKey, string>> = {
