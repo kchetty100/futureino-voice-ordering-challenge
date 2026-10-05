@@ -1011,6 +1011,7 @@ export function Kiosk() {
 
   return (
     <main className={styles.frame}>
+      <div className={styles.shell}>
       <section
         className={styles.screen}
         lang={language}
@@ -1061,6 +1062,7 @@ export function Kiosk() {
           />
         ) : null}
       </section>
+      </div>
     </main>
   );
 }
