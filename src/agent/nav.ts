@@ -8,7 +8,7 @@ export type NavIntent =
   | { kind: "clear_cart" };
 
 /**
- * Movement and cart-screen phrases. Machine switches stay in arrive.requestedMachine.
+ * Movement and cart-screen phrases. Bound kiosks do not switch machines mid-order.
  * Order and confirm stay in rules/tools. Returns null when this is not navigation.
  */
 export function parseNavIntent(text: string): NavIntent | null {

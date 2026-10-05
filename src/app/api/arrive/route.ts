@@ -20,9 +20,24 @@ export async function POST(request: Request) {
   let wake = false;
   let pinnedLanguage: AppLanguage | null = null;
   if (contentType.includes("application/json")) {
-    const body = (await request.json()) as { text?: string; language?: string };
+    const body = (await request.json()) as { text?: string; language?: string; intent?: string };
     text = body.text?.trim() ?? "";
     pinnedLanguage = isAppLanguage(body.language) ? body.language : null;
+    if (body.intent === "welcome") {
+      const lang = pinnedLanguage ?? "en";
+      const say = t(lang, "welcome_choose");
+      return Response.json({
+        session: null,
+        readBack: null,
+        say,
+        notice: null,
+        spotlightIds: [],
+        switchTo: null,
+        ui: null,
+        transcript: "",
+        speakTicket: issueSpeakTicket(say, null, lang),
+      });
+    }
     if (process.env.OPENAI_API_KEY && !(await claimSpeech(speechClientIp(request)))) return speechBudgetDenied();
   } else {
     if (!process.env.OPENAI_API_KEY) return Response.json({ error: "Speech is not configured." }, { status: 503 });

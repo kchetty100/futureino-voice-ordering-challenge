@@ -1,6 +1,6 @@
-/** How long the camera must see nobody before the countdown appears. */
+/** Shorter quiet window (legacy camera face-away). Idle leave uses BLIND_BEFORE_COUNTDOWN_MS. */
 export const AWAY_BEFORE_COUNTDOWN_MS = 10_000;
-/** Quiet time before the countdown when the camera cannot see anyone. */
+/** Quiet time with no order activity before the leave countdown (idle walk-away). */
 export const BLIND_BEFORE_COUNTDOWN_MS = 3 * 60_000;
 /** How long the on-screen countdown runs before the session ends. */
 export const LEAVE_COUNTDOWN_MS = 60_000;
@@ -8,6 +8,7 @@ export const LEAVE_COUNTDOWN_MS = 60_000;
 /**
  * Seconds to show, or null while the customer is still inside the quiet window.
  * 0 means the countdown finished and the session should end.
+ * Kiosk idle leave passes BLIND_BEFORE_COUNTDOWN_MS (3 min quiet, then this countdown).
  */
 export function leaveSecondsLeft(awayForMs: number, beforeMs = AWAY_BEFORE_COUNTDOWN_MS): number | null {
   if (awayForMs < beforeMs) return null;

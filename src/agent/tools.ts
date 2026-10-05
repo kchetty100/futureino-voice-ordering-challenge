@@ -116,13 +116,23 @@ export function runTool(
   return effect(result, result.ok && result.readBack ? sayForReadBack(result.session, result.readBack) : reasonSay(result.session, result.reason ?? "incomplete"), []);
 }
 
-export function isClearYes(text: string): boolean {
+/**
+ * Clear yes / confirm. Pass reviewing=true only on Review / ready_to_pay —
+ * multi-word confirm STT aliases must not steal Menu add turns.
+ */
+export function isClearYes(text: string, reviewing = false): boolean {
   const normalized = spokenWords(text);
   if (YES.has(normalized) || clearYesCue(normalized)) return true;
   if (changesOrder(normalized)) return false;
   const content = normalized.split(" ").filter((token) => token && !YES_FILLER.has(token));
   if (content.length > 0 && content.every((token) => YES_WORD.has(token))) return true;
-  return content.length === 1 && (sameSound(content[0] ?? "", "confirm") || sameSound(content[0] ?? "", "proceed"));
+  // One-token sound-alike: "confrirm" — safe globally.
+  if (content.length === 1 && (sameSound(content[0] ?? "", "confirm") || sameSound(content[0] ?? "", "proceed"))) {
+    return true;
+  }
+  // Multi-word STT garbles ("couldnt farm") — Review only, explicit aliases (no loose subsequence).
+  if (reviewing && CONFIRM_STT_ALIASES.has(normalized)) return true;
+  return false;
 }
 
 /** A reply that accepts the order and also changes it is not a confirmation. */
@@ -141,7 +151,7 @@ export function isClearNo(text: string): boolean {
 export function wantsNoMore(text: string): boolean {
   const normalized = spokenWords(text);
   if (NO_MORE.has(normalized) || noMoreCue(normalized)) return true;
-  return /^(no|nope|nah|nothing)( thanks| thank you| more| else)?$/.test(normalized);
+  return /^(no|nope|nah|nothing)( thanks| thank you| more| else)?$/.test(normalized) || /^(done|checkout|check out)$/.test(normalized);
 }
 
 /** The reply asks to change the order, not merely to stop adding. */
@@ -222,7 +232,7 @@ function sayForTemperature(session: OrderSession, lineId: string): string {
   return `${item.name}, ${line.temperature}.`;
 }
 
-function sayForReadBack(session: OrderSession, readBack: ReadBack): string {
+export function sayForReadBack(session: OrderSession, readBack: ReadBack): string {
   const lines = readBack.lines
     .map((line) => {
       const temp = line.temperature ? `${line.temperature} ` : "";
@@ -369,6 +379,22 @@ const STOP = new Set([
 
 const TEMP_WORDS = new Set(["hot", "iced", "ice", "cold", "room"]);
 
+/** Known Whisper/STT mishears of "confirm" when reviewing the order. */
+const CONFIRM_STT_ALIASES = new Set([
+  "couldnt farm",
+  "couldnt form",
+  "could not farm",
+  "could not form",
+  "come firm",
+  "come form",
+  "corn firm",
+  "con firm",
+  "conf arm",
+  "conf farm",
+  "can firm",
+  "confirmed",
+]);
+
 const YES = new Set([
   "yes",
   "yes please",
@@ -422,6 +448,15 @@ const YES = new Set([
   "uh huh",
   "mm hmm",
   "mhm",
+  "looks good",
+  "looks great",
+  "that looks good",
+  "approved",
+  "yessir",
+  "yes sir",
+  "you bet",
+  "right on",
+  "affirmative",
 ]);
 
 const YES_WORD = new Set(["yes", "yeah", "yep", "yup", "ok", "okay", "confirm", "confirmed", "proceed", "correct", "sure", "perfect", "absolutely", "huh", "mhm", "hmm", "mm"]);
@@ -451,6 +486,18 @@ const NO_MORE = new Set([
   "i dont",
   "i dont want anything else",
   "i dont want anything",
+  "i am done",
+  "i am good",
+  "i am all set",
+  "done",
+  "checkout",
+  "check out",
+  "lets checkout",
+  "lets check out",
+  "ready to pay",
+  "thats enough",
+  "that is enough",
+  "nothing more",
 ]);
 
 const YES_FILLER = new Set([

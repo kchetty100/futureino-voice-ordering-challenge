@@ -629,3 +629,130 @@ The welcome line already on screen moves with the button too, so it does not sta
 **Why:** Speech often drops or swaps one letter in a short word. The temperature check was looking for the exact spelling, so the drink stayed unfinished.
 
 **How we checked:** A latte waiting for a temperature accepts "hod" as hot and "cod" as iced. "hat" does not set one. "could I get a latte" does not come back iced.
+
+## 2026-10-05 — Start does not ask for Hey Future
+
+**Decided:** Tap to start opens the two machines and says welcome. The first thing the customer says can be the order. "Hey Future" is no longer required after the button.
+
+**Alternatives:** Keep the wake phrase so a nearby voice does not open the machines. Start listening on the home screen and still wait for the phrase.
+
+**Why:** The button is already the trigger. A second keyword made the customer say a password before they could order.
+
+**How we checked:** The home screen no longer tells them to say Hey Future. Tap to start requests the welcome line and shows the machines.
+
+## 2026-10-05 — Tap opens the menu; leave is idle-only
+
+**Decided:** The kiosk no longer uses the camera. There is no getUserMedia video, no face detector, and no presence→mic link. Tap to start opens a session for `NEXT_PUBLIC_MACHINE_ID` (coffee by default, or snacks), shows that machine’s menu with listening on, and speaks the welcome line. Hey Future is not required after the tap. Walk-away is idle only: three minutes with no order activity, then a one-minute “Still there?” countdown. Attract does not count down. “Or browse machines” is gone from Attract; MachineChoice remains only for go-back edge cases.
+
+**Alternatives:** Keep the camera for a 10-second face-away leave. Tap into the two-machine picker first. Auto-listen on Attract for Hey Future without a tap.
+
+**Why:** Reviewer point 1 asked to remove the camera from the kiosk UX. The tap is enough consent to start; a wake phrase after it was a second gate. Idle leave matches a single-machine kiosk that cannot see whether someone is still in front.
+
+**How we checked:** `npm test` and `npm run typecheck`. Tap to start should land on the Boost Coffee menu with the mic listening and no camera chrome.
+
+
+## 2026-10-05 — Menu is one catalog, not two machine tabs
+
+**Decided:** The Menu top bar shows only the current machine name. Coffee/Snacks tab chips and Attract “browse machines” / “Say Coffee|Snacks” chrome are gone. MachineChoice markup stays for Engineer’s go-back / `machines` screen edge path; spoken `choose_machine` phrases are untouched.
+
+**Alternatives:** Keep dual tabs so a tap could flip catalogs without voice. Delete MachineChoice in the same pass as routing.
+
+**Why:** A bound kiosk (`NEXT_PUBLIC_MACHINE_ID`) should read as a single catalog. Tab chrome implied switching machines.
+
+**How we checked:** `npm run typecheck`. Menu header has no machine tab buttons; Attract has no browse link.
+
+## 2026-10-05 — Bound kiosk: no MachineChoice, no mid-order switch
+
+**Decided:** Drop the `machines` screen and `MachineChoice` UI. Tap to start still opens `DEFAULT_MACHINE` (`NEXT_PUBLIC_MACHINE_ID`, coffee by default) with listening on. Back from Menu returns to Attract, not a picker. Voice no longer sets `switchTo` to flip catalogs mid-order; asking for the other machine gets `wrong_machine`. Orphan camera files (`watch.ts`, `presence.ts`, `presence.test.ts`) and unused camera / MachineChoice i18n keys are deleted.
+
+**Alternatives:** Keep MachineChoice only for go-back. Keep spoken return-to-coffee/snacks as a catalog flip while leaving Attract single-machine.
+
+**Why:** UI Designer already removed dual Coffee/Snacks chrome. A bound kiosk should not offer a second machine path in UI or speech.
+
+**How we checked:** `npm test` and `npm run typecheck`. Tap → menu; Back → Attract; cross-machine speech stays on the session machine.
+
+## 2026-10-05 — Wipe leftover MachineChoice chrome
+
+**Decided:** After MachineChoice left the render path, delete only its leftover CSS (`.choose`, `.machineCards`, card/voice-row/back chrome) and confirm the picker i18n keys were already gone. Do not touch routing, `DEFAULT_MACHINE` / `MACHINE_ID`, spoken `choose_machine` phrases, or tests beyond type errors from deleted keys.
+
+**Alternatives:** Leave dead CSS until a broader restyle. Delete spoken machine-choice phrases in the same pass.
+
+**Why:** Bound kiosk UI should not keep dual-machine picker styles that nothing references.
+
+**How we checked:** `npm run typecheck`. No `MachineChoice` / picker chrome key refs in `Kiosk.tsx`; picker CSS classes have zero defs.
+
+## 2026-10-05 — Demo Attract picker vs production one-machine unit
+
+**Decided:** Attract is a white Futureino demo picker: logo + neon welcome, “Tap a machine” hint, and two large cards (Boost Coffee / Snacks Bot) with coffee-01 / snacks-01 photos and staggered fade + slide-up load-in. One tap calls `onSelectMachine(machineId)` → `start(machineId)` → menu with listening on and `welcome_choose` (via `beginFromMachine`) — no second Tap-to-start, no camera. Mid-order speech that names the other machine still gets `wrong_machine` (no catalog flip). Back from Menu returns to Attract with both cards. `NEXT_PUBLIC_MACHINE_ID` / `DEFAULT_MACHINE` remain an optional production one-machine-per-unit bind; this demo Attract always offers both.
+
+**Alternatives:** Keep Attract Tap-to-start bound to a single `DEFAULT_MACHINE`. Restore a separate MachineChoice screen. Allow mid-order machine switch.
+
+**Why:** Reviewers need both catalogs in one browser session. A real unit would ship one machine id; the picker is demo chrome, not a production multi-catalog cart.
+
+**How we checked:** `npm test` and `npm run typecheck`. Tap a card → that menu + mic; Back → both cards; cross-machine speech stays `wrong_machine`.
+
+
+## 2026-10-05 — Circular listening meter beside Talk
+
+**Decided:** Replace the absolute full-width `VoiceLine` bar (top of `screenFace`) with a 48px circular frequency meter. Bars are clipped inside the circle. Render it in a `voiceRow` beside Talk on Menu / Review / Pay, only while listening. Sampler / `VOICE_BARS` unchanged; the circle shows every other bar for readability. Talk still owns listening / thinking / speaking labels.
+
+**Alternatives:** Keep a top overlay but shrink it. Put the meter inside the Talk button. Change audio sampling for fewer bars.
+
+**Why:** The old bar overlapped the topbar, transcript/`Reply`, and product grid. A dock-adjacent circle stays out of cart and grid chrome.
+
+**How we checked:** `npm run typecheck`.
+
+## 2026-10-05 — Menu opening skeleton while session resolves
+
+**Decided:** While Engineer’s `opening` flag is true (Attract tap → session live), Menu paints six shimmer product-card placeholders instead of the catalog grid. The Talk / speaking voice row stays in the dock so chrome moves with the grid. Skeleton hides as soon as `opening` clears.
+
+**Alternatives:** Full-screen spinner. Show real catalog cards immediately (local) and only dim them. A separate `sessionPending` flag.
+
+**Why:** Optimistic menu already removes the Attract→session blank; a light skeleton keeps the handoff from feeling stuck without inventing a parallel pending state.
+
+**How we checked:** `npm run typecheck`. Tap a machine → skeleton + Talk; session live → real cards.
+
+
+## 2026-10-05 — Dark Attract restyle: Tap or Speak orb + machine cards
+
+**Decided:** Attract is now a dark navy→purple home screen (supersedes the white demo picker look). Header: transparent Futureino logo (`brand/futureino-logo-clear.png`, a trimmed copy of the existing transparent `futureino-logo.png`) + “Smart Vending Kiosk”, inline EN/ES/FR/HE/AF chips top-right (same `chooseLanguage`; the old dropdown `LanguageButton` is gone). Center: glowing **Tap or Speak** orb with mic, hint line, and a transcript card (idle example copy / last `heard` + `say`) over a thin decorative waveform. Below: “Demo — choose a machine” label and two whole-card buttons (Boost Coffee / Snacks Bot: photo, title, localized short blurb, Start Order pill). Footer: noisy-area tip (tap the mic or use touch) and a status strip “Voice + touch | Unit {NEXT_PUBLIC_UNIT_ID or DEMO-01} | lang”. Cards stack at ≤340px. Reduced motion disables halo, ripple, wave, and card animations.
+
+**Behaviour:** The orb never opens the mic on Attract and never selects a machine. An early tap shows “Pick a machine below” in the transcript card for ~3s, pulses both cards, and scrolls them into view. Whole card / Start Order → `onSelectMachine` → Engineer’s `beginFromMachine` (optimistic menu, welcome from prefetch, listening once the session is live), unchanged. No wake word: the example line is idle copy only, and “Voice + touch” is a capability label, not a live-mic claim.
+
+**Alternatives:** Orb starts Attract STT (`/api/arrive` picks a machine from speech). Orb mirrors a default machine pick. Keep the white Attract.
+
+**Why:** Matches the new home design while respecting the Engineer lock: no STT before a machine is chosen, and one real start path. The demo label keeps the two-machine picker honest as demo chrome.
+
+**How we checked:** `npm run typecheck` and `npm test` (70/70). Static HTML harness screenshots at 430 framed / 390 / 320 / RTL.
+
+## 2026-10-05 — Dark Menu catalogue restyle (cyan + ADD pills)
+
+**Decided:** Restyle Menu (and shared chrome tokens) to match the dark Attract language while locking Engineer wires. Menu wraps in `.menuView`: Futureino mark + machine title, chat bubble with YOU (heard) / MACHINE (say) tags (not a wake gate), dark product cards with hero image / name / price, and a cyan gradient pill — **ADD** when `!requiresTemperature` (snacks), **ADD / CUSTOM** when `requiresTemperature` (coffee) — both still call `onPick` → existing ProductSheet / temp picker. Spotlight (`spotlightIds` + `.spot`) uses a strong cyan glow border. Talk + listening `VoiceLine` circle stay in the dock beside Talk; cart dock / opening skeleton / one-machine catalog / welcome path unchanged. Shared `.screen` tokens go dark charcoal + cyan so Review / Pay / sheet / composer do not flash paper-white; no invented kcal or allergen claims.
+
+**Alternatives:** Keep light Menu under dark Attract. Whole-card tap without ADD pills. Duplicate a second catalog grid.
+
+**Why:** Visual match to the catalogue reference without reopening dual-machine tabs or breaking onPick / onToggleTalk / opening / cart.
+
+**How we checked:** `npm run typecheck`. ADD vs ADD/CUSTOM maps from `CatalogItem.requiresTemperature`.
+
+## 2026-10-05 — Dark Pay restyle (display-only tax + chrome payment tiles)
+
+**Decided:** Restyle Pay to match dark Menu/Attract. Header: Futureino logo + YOU/MACHINE chat (`Reply`). Body: **YOUR CART (N items)** lines as name · temp (if any) · qty · price — no Medium/sugar fields we do not store. Breakdown shows Subtotal, Tax, and a **TOTAL DUE** bar. **SELECT PAYMENT METHOD** offers three chrome tiles (Credit/Debit default, Mobile Pay, Loyalty/Prepaid) with local UI selection only — no payment processor. Dock keeps “Say Confirm and Pay”, Talk/mic + listening meter, unit id (`NEXT_PUBLIC_UNIT_ID` or `DEMO-01`), Composer, and Back / Change order / New order handlers.
+
+**Tax (Engineer lock):** Demo display-only split — `taxCents = Math.round(totalCents * 0.08)`, `subtotalCents = totalCents - taxCents`, **TOTAL DUE = `readBack.totalCents`** (catalog / operator truth). Tax is chrome only; cost accounting is unchanged.
+
+**Alternatives:** Tax $0.00 with TOTAL = cart sum. Real payment processor. Invent size/sugar fields from the mock.
+
+**Why:** Matches the Pay reference without charging or rewriting the order total the engine already confirmed.
+
+**How we checked:** `npm run typecheck`.
+
+## 2026-10-05 — Pure conversation default; Expand reveals touch CTAs
+
+**Decided:** Menu, Review, and Pay default to conversation chrome: Talk + YOU/MACHINE chat (+ listening circle) always visible; one local `controlsOpen` flag (default false) stays open until the user collapses it. Bottom **Expand** / **Collapse** toggles the panel. Behind Expand: Composer / type-instead, Back / Change / New / Review CTAs, voice tips, and Menu cart qty / temp / remove controls. Pay payment tiles stay visible; Confirm/Change/New (and Composer / say-confirm hint) sit behind Expand. Attract unchanged. Mic-fail notices still show; Expand is never gated on Talk/mic. Layout + CSS only — no handler rewrites.
+
+**Alternatives:** Keep all touch CTAs always visible. Auto-open Expand on mic-fail or missing temp. Shared `controlsOpen` lifted to `Kiosk` across screens.
+
+**Why:** Voice-first ordering should read as talk, not a wall of buttons. Expand keeps touch escape hatches (including when the mic is blocked) without changing order/engine wiring.
+
+**How we checked:** `npm run typecheck`. Menu/Review/Pay show Expand by default; Collapse hides CTAs; Pay tiles remain; Attract untouched.

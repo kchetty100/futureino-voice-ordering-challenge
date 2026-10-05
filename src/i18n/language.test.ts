@@ -66,7 +66,7 @@ describe("non-English phrase path", () => {
     const drafted = answerWithRules(started, "iced latte", 2);
     assert.equal(drafted.session.phase, "awaiting_confirmation");
     assert.match(drafted.say, /Total/);
-    assert.match(drafted.say, /sí para confirmar|confirmar el pedido/i);
+    assert.match(drafted.say, /di confirmar|confirmar el pedido/i);
     assert.doesNotMatch(drafted.say, /Would you like to add anything else/);
 
     const cart = answerWithRules(drafted.session, "muestra el carrito", 3);

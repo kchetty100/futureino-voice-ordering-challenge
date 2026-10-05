@@ -4,7 +4,7 @@ import { noteUsage } from "../operator/log";
 export type ConfirmationIntent = "confirm" | "decline" | "other";
 
 const PROMPT = [
-  "The customer was asked: would you like to add anything else, or say yes to confirm the order?",
+  "The customer was asked: would you like to add anything else, or say confirm to confirm the order?",
   "Classify that reply. Return JSON with one field, intent, set to confirm, decline, or other.",
   "confirm: they are done adding. Examples: yes, yeah, confirm, proceed, no, nope, nah, no thanks, nothing, nothing else, no more, that's it, that's all, I'm good, I'm done, all set.",
   "decline: they want this order changed. Examples: change it, make it hot, remove that, wrong item, no make it iced.",

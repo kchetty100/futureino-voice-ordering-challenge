@@ -34,7 +34,7 @@ describe("text agent", () => {
     assert.equal(turn.session.lines[0]?.productId, "coffee-01");
     assert.equal(turn.session.lines[0]?.temperature, undefined);
     assert.match(turn.say, /Americano/);
-    assert.match(turn.say, /Hot, iced, or room/);
+    assert.match(turn.say, /hot, iced, or room/i);
     assert.doesNotMatch(turn.say, /I can offer/);
   });
 
@@ -46,8 +46,8 @@ describe("text agent", () => {
     assert.equal(drafted.session.phase, "awaiting_confirmation");
     assert.match(drafted.say, /iced Latte/);
     assert.match(drafted.say, /\$3\.60/);
-    assert.match(drafted.say, /add anything else/i);
-    assert.match(drafted.say, /say yes to confirm/i);
+    assert.match(drafted.say, /Anything else/i);
+    assert.match(drafted.say, /say confirm/i);
 
     const more = answerWithRules(drafted.session, "something else", 2);
     assert.equal(more.session.phase, "drafting");
@@ -65,7 +65,7 @@ describe("text agent", () => {
 
   it("confirms a spoken yes with punctuation or polite filler", () => {
     const drafted = answerWithRules(coffee(), "I want the americano hot", 1);
-    for (const phrase of ["Yes?", "Yes,", "Yes, please.", "yes that's right", "uh yes", "proceed", "confrirm", "sounds good", "I'll take it"]) {
+    for (const phrase of ["Yes?", "Yes,", "Yes, please.", "yes that's right", "uh yes", "proceed", "confrirm", "sounds good", "I'll take it", "yeah", "yup", "sure", "ok", "okay", "looks good", "confirm"]) {
       const paid = answerWithRules(drafted.session, phrase, 2);
       assert.equal(paid.session.phase, "ready_to_pay", phrase);
       assert.equal(paid.session.confirmedBy, "voice_yes", phrase);
@@ -75,15 +75,25 @@ describe("text agent", () => {
 
   it("does not treat a change as a confirmation word", () => {
     assert.equal(isClearYes("proceed"), true);
+    assert.equal(isClearYes("couldnt farm"), false);
+    assert.equal(isClearYes("couldnt farm", true), true);
+    assert.equal(isClearYes("couldn't farm", true), true);
+    assert.equal(isClearYes("come firm", true), true);
+    assert.equal(isClearYes("chicken for me", true), false);
+    assert.equal(isClearYes("cappuccino from", true), false);
+    assert.equal(isClearYes("couldnt farm make it hot", true), false);
     assert.equal(isClearYes("yes but make it hot"), false);
+    assert.equal(isClearYes("ok make it hot"), false);
+    assert.equal(isClearYes("looks good"), true);
     assert.equal(changesOrder("yes but make it hot"), true);
+    assert.equal(changesOrder("ok make it hot"), true);
     assert.equal(changesOrder("proceed"), false);
     assert.equal(changesOrder("let's ring it up"), false);
   });
 
   it("confirms when they do not want anything else", () => {
     const drafted = answerWithRules(coffee(), "iced latte", 1);
-    for (const phrase of ["no", "no thanks", "nothing else", "that's it", "I'm good", "no more"]) {
+    for (const phrase of ["no", "no thanks", "nothing else", "that's it", "I'm good", "no more", "all set", "I'm done", "I am done", "done", "checkout", "check out"]) {
       const paid = answerWithRules(drafted.session, phrase, 2);
       assert.equal(paid.session.phase, "ready_to_pay", phrase);
       assert.equal(paid.session.lines[0]?.temperature, "iced", phrase);
@@ -94,7 +104,7 @@ describe("text agent", () => {
     const missing = answerWithRules(drafted.session, "a burger", 4);
     assert.equal(missing.say, "This machine doesn't carry that.");
     const vague = answerWithRules(drafted.session, "um", 5);
-    assert.equal(vague.say, "Add another item, or say yes to confirm.");
+    assert.equal(vague.say, "Anything else, or say confirm?");
   });
 
   it("does not treat a qualified yes as confirmation", () => {
@@ -112,28 +122,27 @@ describe("text agent", () => {
     assert.equal(turn.say.includes("burger"), false);
   });
 
-  it("opens Snacks Bot when a coffee order asks what snacks are there", () => {
+  it("stays on the bound machine when speech asks for the other catalog", () => {
     const drafted = answerWithRules(coffee(), "iced latte", 1);
     const turn = answerWithRules(drafted.session, "what snacks do you have", 2);
-    assert.equal(turn.switchTo, "snacks");
+    assert.equal(turn.switchTo, null);
     assert.equal(turn.session.machineId, "coffee");
     assert.equal(turn.session.lines.length, 1);
     assert.equal(turn.session.lines[0]?.productId, "coffee-04");
-    assert.equal(turn.say, "Please view the items below.");
+    assert.equal(turn.say, "That item is not on this machine.");
     assert.deepEqual(turn.spotlightIds, []);
     const added = answerWithRules(drafted.session, "I would like to add a snack", 3);
-    assert.equal(added.switchTo, "snacks");
+    assert.equal(added.switchTo, null);
     assert.equal(added.session.lines.length, 1);
     assert.equal(added.session.lines[0]?.productId, "coffee-04");
-    assert.equal(added.say, "Please view the items below.");
-    assert.doesNotMatch(added.say, /doesn't carry/);
+    assert.equal(added.say, "That item is not on this machine.");
     assert.equal(requestedMachine("I would like to add a snack"), "snacks");
     assert.equal(requestedMachine("what snacks do you have"), "snacks");
     assert.equal(requestedMachine("What's next do you have?"), "snacks");
     const coffeeAsk = answerWithRules(coffee(), "I want a coffee", 4);
     assert.equal(coffeeAsk.session.lines.length, 0);
     assert.equal(coffeeAsk.say, "Please view the items below.");
-    assert.equal(coffeeAsk.switchTo, "coffee");
+    assert.equal(coffeeAsk.switchTo, null);
     assert.deepEqual(coffeeAsk.spotlightIds, []);
     assert.equal(machineForUtterance("iced latte"), "coffee");
     assert.equal(machineForUtterance("potato chips"), "snacks");
@@ -176,13 +185,13 @@ describe("text agent", () => {
     assert.equal(both.session.lines[1]?.temperature, undefined);
     assert.match(both.say, /Daily Black/);
     assert.match(both.say, /Mocha/);
-    assert.match(both.say, /Hot, iced, or room/);
+    assert.match(both.say, /hot, iced, or room/i);
 
     const first = answerWithRules(both.session, "hot", 2);
     assert.equal(first.session.lines[0]?.temperature, "hot");
     assert.equal(first.session.lines[1]?.temperature, undefined);
     assert.match(first.say, /Daily Black is hot/);
-    assert.match(first.say, /Mocha still needs a temperature/);
+    assert.match(first.say, /Mocha needs hot, iced, or room/i);
 
     const second = answerWithRules(first.session, "iced", 3);
     assert.equal(second.session.lines[1]?.temperature, "iced");
@@ -282,7 +291,7 @@ describe("text agent", () => {
     const turn = answerWithRules(asked.session, "potato chips", 2);
     assert.equal(turn.session.lines.length, 2);
     assert.match(turn.say, /Added Potato Chips/);
-    assert.match(turn.say, /Americano still needs a temperature/);
+    assert.match(turn.say, /Americano needs hot, iced, or room/i);
     assert.doesNotMatch(turn.say, /Potato Chips is in the cart/);
   });
 
@@ -313,7 +322,7 @@ describe("text agent", () => {
     const asked = answerWithRules(coffee(), "latte", 1);
     assert.equal(asked.session.phase, "drafting");
     assert.equal(asked.session.lines[0]?.temperature, undefined);
-    assert.match(asked.say, /Hot, iced, or room/);
+    assert.match(asked.say, /hot, iced, or room/i);
 
     const iced = answerWithRules(asked.session, "iced", 2);
     assert.equal(iced.session.lines[0]?.temperature, "iced");
@@ -343,7 +352,7 @@ describe("text agent", () => {
     assert.equal(again.session.lines.length, 1);
     assert.equal(again.session.lines[0]?.quantity, 1);
     assert.equal(again.session.lines[0]?.temperature, undefined);
-    assert.match(again.say, /Hot, iced, or room/);
+    assert.match(again.say, /hot, iced, or room/i);
 
     const korean = applyHeard(
       asked.session,
@@ -352,7 +361,7 @@ describe("text agent", () => {
     );
     assert.equal(korean?.session.lines.length, 1);
     assert.equal(korean?.session.lines[0]?.quantity, 1);
-    assert.match(korean?.say ?? "", /still needs a temperature/);
+    assert.match(korean?.say ?? "", /needs hot, iced, or room/i);
   });
 
   it("says allergens are unknown and does not change the cart", () => {
@@ -521,15 +530,15 @@ describe("text agent", () => {
     assert.equal(aside.session.lines[0]?.productId, "coffee-04");
     assert.equal(aside.session.lines[0]?.temperature, "iced");
     assert.equal(aside.session.phase, drafted.session.phase);
-    assert.match(aside.say, /Add another item, or say yes/);
+    assert.match(aside.say, /Anything else, or say confirm/);
 
     const browsing = answerWithRules(coffee(), "she was telling me the latte shop is closed", 3);
     assert.equal(browsing.session.lines.length, 0);
-    assert.equal(browsing.say, "I didn't catch that.");
+    assert.equal(browsing.say, "Didn't catch that.");
 
     const mumble = answerWithRules(coffee(), "and uh", 4);
     assert.equal(mumble.session.lines.length, 0);
-    assert.equal(mumble.say, "I didn't catch that.");
+    assert.equal(mumble.say, "Didn't catch that.");
   });
 
   it("does not let a model add a drink the customer did not name", () => {

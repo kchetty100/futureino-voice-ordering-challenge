@@ -140,9 +140,9 @@ export function isUnresolvedCartEdit(session: OrderSession, text: string): boole
 }
 
 function directReply(session: OrderSession, text: string, now: number): TurnResult | null {
-  if (isClearYes(text)) return acceptOrder(session, now);
-
   const reviewing = session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay";
+  if (isClearYes(text, reviewing)) return acceptOrder(session, now);
+
   if (reviewing && wantsNoMore(text) && !wantsChange(text)) return acceptOrder(session, now);
 
   if (isClearNo(text) && reviewing) {
@@ -170,13 +170,13 @@ function directReply(session: OrderSession, text: string, now: number): TurnResu
 
   const destination = requestedMachine(text);
   if (destination) {
-    const opening = destination !== session.machineId;
-    const intro = machineIntro(destination, langOf(session));
-    const stayed =
-      opening && (session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay")
-        ? apply(session, { type: "revise", now })
-        : apply(session, { type: "activity", now });
-    return { ...done(stayed.session, intro.say, intro.spotlightIds, null), switchTo: destination };
+    const stayed = apply(session, { type: "activity", now });
+    if (destination === session.machineId) {
+      const intro = machineIntro(destination, langOf(session));
+      return done(stayed.session, intro.say, intro.spotlightIds, null);
+    }
+    // Bound kiosk: stay on this machine; do not flip catalogs mid-order.
+    return done(stayed.session, t(langOf(stayed.session), "wrong_machine"), [], null);
   }
 
   if (wantsSomethingElse(text) && session.lines.length > 0 && (session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay")) {

@@ -5,6 +5,7 @@ const TYPES: Record<string, string> = {
   "futureino-logo-trimmed.png": "image/png",
   "futureino-logo-trimmed.webp": "image/webp",
   "futureino-logo.png": "image/png",
+  "futureino-logo-clear.png": "image/png",
 };
 
 export async function GET(

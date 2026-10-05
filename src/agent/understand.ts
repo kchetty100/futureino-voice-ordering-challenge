@@ -81,18 +81,24 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
   if (heard.action === "set_quantity") return quantityHeard(session, heard, now);
   if (heard.action === "set_temperature") return temperatureHeard(session, heard, now);
   if (heard.action === "menu" && heard.menu) {
-    const opening = heard.menu !== session.machineId;
-    const intro = machineIntro(heard.menu, langOf(session));
-    const stayed =
-      opening && (session.phase === "awaiting_confirmation" || session.phase === "ready_to_pay")
-        ? apply(session, { type: "revise", now })
-        : apply(session, { type: "activity", now });
+    const stayed = apply(session, { type: "activity", now });
+    if (heard.menu === session.machineId) {
+      const intro = machineIntro(heard.menu, langOf(session));
+      return {
+        session: stayed.session,
+        say: intro.say,
+        spotlightIds: intro.spotlightIds,
+        readBack: null,
+        switchTo: null,
+        ui: null,
+      };
+    }
     return {
       session: stayed.session,
-      say: intro.say,
-      spotlightIds: intro.spotlightIds,
+      say: t(langOf(stayed.session), "wrong_machine"),
+      spotlightIds: [],
       readBack: null,
-      switchTo: opening ? heard.menu : null,
+      switchTo: null,
       ui: null,
     };
   }

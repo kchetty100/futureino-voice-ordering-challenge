@@ -403,7 +403,7 @@ function missingFor(session: OrderSession): MissingField[] {
   return missing;
 }
 
-function buildReadBack(session: OrderSession): ReadBack {
+export function buildReadBack(session: OrderSession): ReadBack {
   const lines: ReadBackLine[] = session.lines.map((line) => {
     const item = getItem(line.productId);
     const unitPriceCents = item?.priceCents ?? 0;

@@ -8,6 +8,17 @@ export function clearYesCue(normalized: string): boolean {
   if (/^(sí|si|oui|כן|ja)([!?.,\s]*)$/i.test(normalized)) return true;
   const tokens = normalized.split(" ").filter(Boolean);
   if (tokens.length <= 3 && /^(sí|si|oui|כן|ja)\b/.test(normalized)) return true;
+  // English affirmatives that never change the cart (qualified "ok make it hot" stays false).
+  if (
+    /^(yes|yeah|yep|yup|sure|ok|okay|confirm|proceed|alright|perfect|absolutely)( please| thanks| thank you)?$/.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  if (/^(sounds|looks) (good|great|fine)$/.test(normalized)) return true;
+  if (/^(ill|i will) take it$/.test(normalized)) return true;
+  if (/^(go ahead|go for it|ring it up|place (the|my) order)$/.test(normalized)) return true;
   return false;
 }
 
@@ -17,7 +28,19 @@ export function clearNoCue(normalized: string): boolean {
 
 export function noMoreCue(normalized: string): boolean {
   if (NO_MORE_EXACT.has(normalized)) return true;
-  return /^(nada más|nada mas|rien de plus|rien d autre|לא תודה|niks meer|geen meer)$/i.test(normalized);
+  if (/^(nada más|nada mas|rien de plus|rien d autre|לא תודה|niks meer|geen meer)$/i.test(normalized)) {
+    return true;
+  }
+  // English "done adding" — not a cart change ("no, make it hot" stays out via wantsChange).
+  if (
+    /^(done|all set|all good|im done|i am done|im good|i am good|im all set|i am all set)$/.test(normalized)
+  ) {
+    return true;
+  }
+  if (/^(thats|that is) (it|all|enough|everything)$/.test(normalized)) return true;
+  if (/^(checkout|check out|lets checkout|lets check out|ready to pay)$/.test(normalized)) return true;
+  if (/^(nothing|no) (else|more)( please| thanks| thank you)?$/.test(normalized)) return true;
+  return false;
 }
 
 /** Temperature from multilingual words when the utterance is otherwise bare. */
@@ -112,6 +135,20 @@ const YES_EXACT = new Set([
   "בסדר",
   "ja",
   "ja asseblief",
+  "yes",
+  "yes please",
+  "yeah",
+  "yep",
+  "yup",
+  "sure",
+  "ok",
+  "okay",
+  "confirm",
+  "proceed",
+  "sounds good",
+  "looks good",
+  "ill take it",
+  "i will take it",
 ]);
 
 const NO_EXACT = new Set([
@@ -143,4 +180,19 @@ const NO_MORE_EXACT = new Set([
   "די",
   "niks meer",
   "dis alles",
+  "done",
+  "all set",
+  "all good",
+  "im done",
+  "i am done",
+  "im good",
+  "i am good",
+  "checkout",
+  "check out",
+  "thats it",
+  "thats all",
+  "that is all",
+  "that is it",
+  "nothing else",
+  "no more",
 ]);

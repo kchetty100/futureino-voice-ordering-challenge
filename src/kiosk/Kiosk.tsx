@@ -10,24 +10,19 @@ import {
   type Temperature,
 } from "../catalog/index";
 import { parseNavIntent, type UiCommand } from "../agent/nav";
+import { isClearYes, wantsChange, wantsNoMore } from "../agent/tools";
 import { APP_LANGUAGES, isAppLanguage, t, ui as screenText, type AppLanguage } from "../i18n";
-import { isHeyFuture } from "../agent/arrive";
 import { BLIND_BEFORE_COUNTDOWN_MS, formatLeaveClock, LEAVE_COUNTDOWN_MS, leaveSecondsLeft } from "./leave";
 import { PLAYBACK_TAIL_MS, utteranceReady, VOICE_HOLD_MS } from "./voice";
-import { type WatchStatus } from "./presence";
 import { useSoloKiosk } from "./solo";
-import { useCustomerWatch } from "./watch";
 import { type OrderInput, type OrderSession, type ReadBack } from "../order/engine";
 import styles from "./kiosk.module.css";
 
-type Screen = "attract" | "machines" | "menu" | "review" | "pay";
+type Screen = "attract" | "menu" | "review" | "pay";
 type Picker = { productId: string; lineId?: string };
 
 function retargetSay(current: string | null, next: AppLanguage): string | null {
   if (!current) return current;
-  if (APP_LANGUAGES.some((language) => screenText(language, "hey_future") === current)) {
-    return screenText(next, "hey_future");
-  }
   if (APP_LANGUAGES.some((language) => t(language, "welcome_choose") === current)) {
     return t(next, "welcome_choose");
   }
@@ -47,6 +42,14 @@ const LANGUAGES: { id: AppLanguage; code: string; label: string }[] = [
 
 const TEMP_IDS: Temperature[] = ["hot", "iced", "room"];
 
+/** Optional default / production bind. Attract always offers both machines for the demo picker. */
+function defaultMachineId(): MachineId {
+  const raw = process.env.NEXT_PUBLIC_MACHINE_ID?.trim().toLowerCase();
+  return raw === "snacks" ? "snacks" : "coffee";
+}
+
+const DEFAULT_MACHINE: MachineId = defaultMachineId();
+
 function tempWord(language: AppLanguage, id: Temperature): string {
   return screenText(language, id);
 }
@@ -55,15 +58,6 @@ function tempHint(language: AppLanguage, id: Temperature): string {
   if (id === "hot") return screenText(language, "hot_hint");
   if (id === "iced") return screenText(language, "iced_hint");
   return screenText(language, "room_hint");
-}
-
-function cameraText(status: WatchStatus, language: AppLanguage): string {
-  if (status === "starting") return screenText(language, "cam_starting");
-  if (status === "blocked") return screenText(language, "cam_blocked");
-  if (status === "looking") return screenText(language, "cam_looking");
-  if (status === "seen") return screenText(language, "cam_seen");
-  if (status === "unavailable") return screenText(language, "cam_unavailable");
-  return "";
 }
 
 function isNetworkNotice(notice: string | null): boolean {
@@ -81,7 +75,6 @@ type ServerState = {
   say: string | null;
   notice: string | null;
   spotlightIds: string[];
-  switchTo?: MachineId | null;
   ui?: UiCommand | null;
   transcript?: string | null;
   speakTicket?: string | null;
@@ -106,11 +99,12 @@ export function Kiosk() {
   const [spotlightIds, setSpotlightIds] = useState<string[]>([]);
   const [language, setLanguage] = useState<AppLanguage>("en");
   const [languagePinned, setLanguagePinned] = useState(false);
-  const [languageOpen, setLanguageOpen] = useState(false);
   const languageRef = useRef({ language: "en" as AppLanguage, pinned: false });
   languageRef.current = { language, pinned: languagePinned };
   const [menu, setMenu] = useState<MachineId | null>(null);
   const [showMenu, setShowMenu] = useState(false);
+  /** True from Attract tap until session POST resolves — Menu may paint with session null. */
+  const [opening, setOpening] = useState(false);
   const [uiPulse, setUiPulse] = useState<{ command: UiCommand; id: number } | null>(null);
   const requestSeq = useRef(0);
   const liveSessionId = useRef<string | null>(null);
@@ -120,9 +114,24 @@ export function Kiosk() {
   const meterCtx = useRef<AudioContext | null>(null);
   const voice = useRef<AudioBufferSourceNode | null>(null);
   const speakingNow = useRef(false);
+  /** Bumped on every stop so an in-flight welcome line never plays over newer speech. */
+  const welcomeSeq = useRef(0);
+  /** Welcome audio per language, so Attract tap plays at once without waiting on TTS. */
+  const welcomeAudio = useRef(new Map<AppLanguage, ArrayBuffer>());
+  /** One in-flight welcome TTS prefetch per language key. */
+  const welcomePrefetch = useRef(new Map<AppLanguage, Promise<ArrayBuffer | null>>());
+  /** Speak TTS cache (read-back + ready_to_pay): `${cartVersion}|${language}|${say}` → audio bytes. */
+  const readBackAudio = useRef(new Map<string, ArrayBuffer>());
+  /** In-flight warm keyed by `${cartVersion}|${language}` (say unknown until warm returns). */
+  const readBackPrefetch = useRef(new Map<string, Promise<ArrayBuffer | null>>());
+  /** In-flight ready_to_pay warm keyed by `${cartVersion}|${language}`. */
+  const readyPayPrefetch = useRef(new Map<string, Promise<ArrayBuffer | null>>());
+  /** Last warmed ready_to_pay say per cart+language (shared speak cache is say-keyed). */
+  const readyPaySay = useRef(new Map<string, string>());
   const leading = useSoloKiosk();
   const soloRef = useRef(true);
   soloRef.current = leading;
+  const stopTalkRef = useRef<() => void>(() => {});
 
   function audioContext(): AudioContext {
     if (!audioCtx.current) audioCtx.current = new AudioContext();
@@ -130,6 +139,7 @@ export function Kiosk() {
   }
 
   function stopPlayback() {
+    welcomeSeq.current += 1;
     speakingNow.current = false;
     const source = voice.current;
     voice.current = null;
@@ -160,8 +170,20 @@ export function Kiosk() {
       return;
     }
     stopPlayback();
+    // Flip Talk to speaking immediately (cache hit or TTS fetch) — same as welcome.
     speakingNow.current = true;
     setSpeaking(true);
+    const lang: AppLanguage = isAppLanguage(state.session?.preferredLanguage)
+      ? state.session!.preferredLanguage
+      : languageRef.current.language;
+    const cv = state.session?.cartVersion;
+    if (cv != null) {
+      const cached = readBackAudio.current.get(readBackCacheKey(cv, lang, line));
+      if (cached) {
+        void playBytes(cached, () => mine === requestSeq.current && soloRef.current);
+        return;
+      }
+    }
     void speakLine(line, ticket, mine);
   }
 
@@ -190,17 +212,17 @@ export function Kiosk() {
     }
   }
 
-  async function playBytes(bytes: ArrayBuffer) {
-    if (!soloRef.current) return;
+  async function playBytes(bytes: ArrayBuffer, still: () => boolean = () => soloRef.current) {
+    if (!still()) return;
     try {
       const context = audioContext();
       await context.resume();
-      if (!soloRef.current) {
+      if (!still()) {
         stopPlayback();
         return;
       }
       const buffer = await context.decodeAudioData(bytes.slice(0));
-      if (!soloRef.current) {
+      if (!still()) {
         stopPlayback();
         return;
       }
@@ -222,7 +244,265 @@ export function Kiosk() {
     }
   }
 
-  async function post(url: string, body: unknown): Promise<ServerState | null> {
+  function welcomeCacheKey(language: AppLanguage, pinned: boolean): AppLanguage {
+    return pinned ? language : "en";
+  }
+
+  /**
+   * Fetch welcome TTS into welcomeAudio (no playback). Dedupes in-flight work per language.
+   * Completing after leave Attract still caches — next tap / visit can use it.
+   */
+  function loadWelcomeAudio(language: AppLanguage, pinned: boolean): Promise<ArrayBuffer | null> {
+    const key = welcomeCacheKey(language, pinned);
+    const cached = welcomeAudio.current.get(key);
+    if (cached) return Promise.resolve(cached);
+    const pending = welcomePrefetch.current.get(key);
+    if (pending) return pending;
+    const job = (async (): Promise<ArrayBuffer | null> => {
+      try {
+        const arrive = await fetch("/api/arrive", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ intent: "welcome", ...(pinned ? { language } : {}) }),
+        });
+        if (!arrive.ok) return null;
+        const state = (await arrive.json()) as ServerState;
+        const ticket = state.speakTicket?.trim();
+        const line = (state.say ?? "").trim();
+        if (!ticket || !line) return null;
+        const spoken = await fetch("/api/speak", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ say: line, ticket }),
+        });
+        if (!spoken.ok) return null;
+        const bytes = await spoken.arrayBuffer();
+        welcomeAudio.current.set(key, bytes);
+        return bytes;
+      } catch {
+        return null;
+      } finally {
+        welcomePrefetch.current.delete(key);
+      }
+    })();
+    welcomePrefetch.current.set(key, job);
+    return job;
+  }
+
+  /** Warm welcomeAudio while Attract is idle so the first machine tap plays from cache. */
+  function prefetchWelcome(language: AppLanguage, pinned: boolean) {
+    if (!soloRef.current) return;
+    if (screenRef.current !== "attract") return;
+    const key = welcomeCacheKey(language, pinned);
+    if (welcomeAudio.current.has(key) || welcomePrefetch.current.has(key)) return;
+    void loadWelcomeAudio(language, pinned);
+  }
+
+  function readBackCacheKey(cartVersion: number, language: AppLanguage, say: string): string {
+    return `${cartVersion}|${language}|${say}`;
+  }
+
+  function readBackPrefetchKey(cartVersion: number, language: AppLanguage): string {
+    return `${cartVersion}|${language}`;
+  }
+
+  function cartReadyForReadBack(next: OrderSession): boolean {
+    if (next.lines.length === 0) return false;
+    return !next.lines.some(
+      (line) => getItem(line.productId)?.requiresTemperature === true && line.temperature === undefined,
+    );
+  }
+
+  function invalidateReadBackCache(cartVersion: number) {
+    for (const key of [...readBackAudio.current.keys()]) {
+      if (!key.startsWith(`${cartVersion}|`)) readBackAudio.current.delete(key);
+    }
+    for (const key of [...readBackPrefetch.current.keys()]) {
+      if (!key.startsWith(`${cartVersion}|`)) readBackPrefetch.current.delete(key);
+    }
+    for (const key of [...readyPayPrefetch.current.keys()]) {
+      if (!key.startsWith(`${cartVersion}|`)) readyPayPrefetch.current.delete(key);
+    }
+    for (const key of [...readyPaySay.current.keys()]) {
+      if (!key.startsWith(`${cartVersion}|`)) readyPaySay.current.delete(key);
+    }
+  }
+
+  /**
+   * Fetch read-back TTS into readBackAudio (no playback). Dedupes in-flight work per cart+language.
+   * Does not change session phase — warm-readback only builds the spoken line.
+   */
+  function loadReadBackAudio(
+    sessionId: string,
+    cartVersion: number,
+    language: AppLanguage,
+  ): Promise<ArrayBuffer | null> {
+    const prefetchKey = readBackPrefetchKey(cartVersion, language);
+    const readySay = readyPaySay.current.get(prefetchKey);
+    for (const [key, bytes] of readBackAudio.current) {
+      if (!key.startsWith(`${prefetchKey}|`)) continue;
+      // Shared speak cache may also hold ready_to_pay for this cart — skip that say.
+      if (readySay && key === readBackCacheKey(cartVersion, language, readySay)) continue;
+      return Promise.resolve(bytes);
+    }
+    const pending = readBackPrefetch.current.get(prefetchKey);
+    if (pending) return pending;
+    const job = (async (): Promise<ArrayBuffer | null> => {
+      try {
+        const warm = await fetch(`/api/sessions/${sessionId}/warm-readback`, { method: "POST" });
+        if (!warm.ok) return null;
+        const data = (await warm.json()) as {
+          say?: string;
+          speakTicket?: string | null;
+          cartVersion?: number;
+        };
+        const ticket = data.speakTicket?.trim();
+        const line = (data.say ?? "").trim();
+        const cv = data.cartVersion ?? cartVersion;
+        if (!ticket || !line || cv !== cartVersion) return null;
+        const spoken = await fetch("/api/speak", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ say: line, ticket }),
+        });
+        if (!spoken.ok) return null;
+        const bytes = await spoken.arrayBuffer();
+        invalidateReadBackCache(cv);
+        readBackAudio.current.set(readBackCacheKey(cv, language, line), bytes);
+        return bytes;
+      } catch {
+        return null;
+      } finally {
+        readBackPrefetch.current.delete(prefetchKey);
+      }
+    })();
+    readBackPrefetch.current.set(prefetchKey, job);
+    return job;
+  }
+
+  /** Warm read-back TTS while cart is complete so Review / checkout plays from cache. */
+  function prefetchReadBack(sessionId: string, cartVersion: number, language: AppLanguage) {
+    if (!soloRef.current) return;
+    if (opening) return;
+    if (screenRef.current === "pay" || screenRef.current === "attract") return;
+    const prefetchKey = readBackPrefetchKey(cartVersion, language);
+    const readySay = readyPaySay.current.get(prefetchKey);
+    const hasReadBack = [...readBackAudio.current.keys()].some((key) => {
+      if (!key.startsWith(`${prefetchKey}|`)) return false;
+      if (readySay && key === readBackCacheKey(cartVersion, language, readySay)) return false;
+      return true;
+    });
+    if (hasReadBack) return;
+    if (readBackPrefetch.current.has(prefetchKey)) return;
+    void loadReadBackAudio(sessionId, cartVersion, language);
+  }
+
+  /**
+   * Fetch ready_to_pay TTS into the shared speak cache (no playback, no phase change).
+   * Dedupes in-flight work per cart+language; beginSpeech cache-hits by say.
+   */
+  function loadReadyPayAudio(
+    sessionId: string,
+    cartVersion: number,
+    language: AppLanguage,
+  ): Promise<ArrayBuffer | null> {
+    const prefetchKey = readBackPrefetchKey(cartVersion, language);
+    const knownSay = readyPaySay.current.get(prefetchKey);
+    if (knownSay) {
+      const cached = readBackAudio.current.get(readBackCacheKey(cartVersion, language, knownSay));
+      if (cached) return Promise.resolve(cached);
+    }
+    const pending = readyPayPrefetch.current.get(prefetchKey);
+    if (pending) return pending;
+    const job = (async (): Promise<ArrayBuffer | null> => {
+      try {
+        const warm = await fetch(`/api/sessions/${sessionId}/warm-ready`, { method: "POST" });
+        if (!warm.ok) return null;
+        const data = (await warm.json()) as {
+          say?: string;
+          speakTicket?: string | null;
+          cartVersion?: number;
+        };
+        const ticket = data.speakTicket?.trim();
+        const line = (data.say ?? "").trim();
+        const cv = data.cartVersion ?? cartVersion;
+        if (!ticket || !line || cv !== cartVersion) return null;
+        readyPaySay.current.set(prefetchKey, line);
+        const existing = readBackAudio.current.get(readBackCacheKey(cv, language, line));
+        if (existing) return existing;
+        const spoken = await fetch("/api/speak", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ say: line, ticket }),
+        });
+        if (!spoken.ok) return null;
+        const bytes = await spoken.arrayBuffer();
+        invalidateReadBackCache(cv);
+        readBackAudio.current.set(readBackCacheKey(cv, language, line), bytes);
+        readyPaySay.current.set(prefetchKey, line);
+        return bytes;
+      } catch {
+        return null;
+      } finally {
+        readyPayPrefetch.current.delete(prefetchKey);
+      }
+    })();
+    readyPayPrefetch.current.set(prefetchKey, job);
+    return job;
+  }
+
+  /** Warm ready_to_pay TTS while sitting on Review so Confirm / yes plays from cache. */
+  function prefetchReadyPay(sessionId: string, cartVersion: number, language: AppLanguage) {
+    if (!soloRef.current) return;
+    if (opening) return;
+    if (screenRef.current !== "review") return;
+    const prefetchKey = readBackPrefetchKey(cartVersion, language);
+    const knownSay = readyPaySay.current.get(prefetchKey);
+    if (knownSay && readBackAudio.current.has(readBackCacheKey(cartVersion, language, knownSay))) return;
+    if (readyPayPrefetch.current.has(prefetchKey)) return;
+    void loadReadyPayAudio(sessionId, cartVersion, language);
+  }
+
+  /** Paint Pay immediately when confirm is certain client-side (tap / clear yes). */
+  function paintPayOptimistic() {
+    if (screenRef.current !== "review") return;
+    setShowMenu(false);
+    show("pay");
+  }
+
+  /**
+   * Attract tap welcome. Runs beside the session POST so the voice starts with the menu,
+   * not after the session round trip. Cache / in-flight prefetch plays immediately; else generates.
+   * Any later speech or stop cancels playback.
+   */
+  function speakWelcome(language: AppLanguage, pinned: boolean) {
+    stopPlayback();
+    if (!soloRef.current) return;
+    const mine = welcomeSeq.current;
+    const still = () => mine === welcomeSeq.current && soloRef.current;
+    const quiet = () => {
+      if (!still()) return;
+      speakingNow.current = false;
+      setSpeaking(false);
+    };
+    speakingNow.current = true;
+    setSpeaking(true);
+    void (async () => {
+      try {
+        const bytes = await loadWelcomeAudio(language, pinned);
+        if (!bytes || !still()) return quiet();
+        await playBytes(bytes, still);
+      } catch {
+        quiet();
+      }
+    })();
+  }
+
+  async function post(
+    url: string,
+    body: unknown,
+    opts: { keepVoice?: boolean } = {},
+  ): Promise<ServerState | null> {
     const mine = ++requestSeq.current;
     const isAudio = body instanceof FormData;
     let response: Response;
@@ -283,15 +563,11 @@ export function Kiosk() {
         setSay(t(languageRef.current.language, "open_menu_first"));
         return state;
       }
-      if (isHeyFuture(transcript)) {
-        setHeard(null);
-        setSay(state.say ?? t(languageRef.current.language, "welcome_choose"));
-        show("machines");
-        beginSpeech(state, mine);
+      if (!state.session) {
+        setSay(state.say ?? t(languageRef.current.language, "didnt_catch"));
+        if (transcript) beginSpeech(state, mine);
         return state;
       }
-      setSay(transcript ? screenText(languageRef.current.language, "hey_future") : state.say ?? screenText(languageRef.current.language, "hey_future"));
-      return state;
     }
     const nextSession = state.session;
     if (nextSession && !isNewerSession(nextSession)) return state;
@@ -302,10 +578,6 @@ export function Kiosk() {
         setShowMenu(true);
         show("menu");
         setUiPulse((prev) => ({ command: ui, id: (prev?.id ?? 0) + 1 }));
-      } else if (state.switchTo) {
-        setMenu(state.switchTo);
-        setShowMenu(true);
-        show("menu");
       } else if (state.readBack && nextSession?.phase === "ready_to_pay") {
         setShowMenu(false);
         show("pay");
@@ -325,12 +597,15 @@ export function Kiosk() {
         setLanguagePinned(true);
       }
     }
-    if (!goingBack) setReadBack(state.switchTo ? null : state.readBack);
+    if (!goingBack) setReadBack(state.readBack);
     setNotice(state.notice);
-    setSay(goingBack && !movedBack ? screenText(languageRef.current.language, "home_screen") : state.say);
+    // keepVoice: a silent reply (session open) must not blank the line on screen or cut the welcome voice.
+    if (!opts.keepVoice || state.say) {
+      setSay(goingBack && !movedBack ? screenText(languageRef.current.language, "home_screen") : state.say);
+    }
     setSpotlightIds(state.spotlightIds);
     setHeard(typeof state.transcript === "string" && state.transcript ? state.transcript : null);
-    beginSpeech(state, mine);
+    if (!opts.keepVoice || state.speakTicket) beginSpeech(state, mine);
     return state;
   }
 
@@ -342,6 +617,7 @@ export function Kiosk() {
     setSession(null);
     setMenu(null);
     setShowMenu(false);
+    setOpening(false);
     show("attract");
     setReadBack(null);
     setPicker(null);
@@ -349,6 +625,7 @@ export function Kiosk() {
     setSay(null);
     setHeard(null);
     setSpotlightIds([]);
+    stopTalkRef.current();
     stopPlayback();
   }, [session]);
 
@@ -366,11 +643,15 @@ export function Kiosk() {
       return true;
     }
     const here = screenRef.current;
-    const next: Screen = here === "pay" ? "review" : here === "review" ? "menu" : here === "menu" ? "machines" : "attract";
+    const next: Screen = here === "pay" ? "review" : here === "review" ? "menu" : "attract";
     if (next === here) return false;
     show(next);
     if (next === "menu") setShowMenu(true);
-    if (next === "review") setShowMenu(false);
+    if (next === "review" || next === "attract") setShowMenu(false);
+    if (next === "attract") {
+      setOpening(false);
+      stopTalkRef.current();
+    }
     return true;
   }
 
@@ -382,17 +663,6 @@ export function Kiosk() {
     }
     const moved = retreat();
     setSay(moved ? t(languageRef.current.language, "going_back") : screenText(languageRef.current.language, "home_screen"));
-  }
-
-  function openMachine(machineId: MachineId) {
-    if (session && session.phase !== "abandoned") {
-      setPicker(null);
-      setMenu(machineId);
-      setShowMenu(true);
-      show("menu");
-      return;
-    }
-    void start(machineId);
   }
 
   function run(command: OrderInput) {
@@ -409,17 +679,20 @@ export function Kiosk() {
     setMenu(machineId);
     setShowMenu(true);
     const choice = languageRef.current;
-    await post("/api/sessions", {
-      machineId,
-      ...(choice.pinned ? { language: choice.language } : {}),
-    });
+    await post(
+      "/api/sessions",
+      {
+        machineId,
+        ...(choice.pinned ? { language: choice.language } : {}),
+      },
+      { keepVoice: true },
+    );
   }
 
   function chooseLanguage(next: AppLanguage) {
     languageRef.current = { language: next, pinned: true };
     setLanguage(next);
     setLanguagePinned(true);
-    setLanguageOpen(false);
     setSay((current) => retargetSay(current, next));
     const live = session && session.phase !== "abandoned" ? session : null;
     if (live) {
@@ -436,7 +709,9 @@ export function Kiosk() {
       setSession(null);
       setMenu(null);
       setShowMenu(false);
+      setOpening(false);
       show("attract");
+      stopTalkRef.current();
       return;
     }
     void run({ type: "cancel" });
@@ -446,6 +721,15 @@ export function Kiosk() {
     if (!session) return;
     sheetBack.current = picker != null;
     setPicker(null);
+    // Rules-clear confirm from Review: paint Pay before the session round trip (like Menu welcome).
+    if (
+      screenRef.current === "review" &&
+      readBack &&
+      session.phase === "awaiting_confirmation" &&
+      (isClearYes(text) || (wantsNoMore(text) && !wantsChange(text)))
+    ) {
+      paintPayOptimistic();
+    }
     const choice = languageRef.current;
     void post(`/api/sessions/${session.id}/message`, {
       text,
@@ -463,16 +747,12 @@ export function Kiosk() {
     body.append("seconds", String(clip.seconds));
     if (languageRef.current.pinned) body.append("language", languageRef.current.language);
     if (screenRef.current === "attract" || !session) {
-      if (screenRef.current === "attract") body.append("intent", "wake");
       return post("/api/arrive", body);
     }
     return post(`/api/sessions/${session.id}/speech`, body);
   }
 
-  const [camera, setCamera] = useState<HTMLVideoElement | null>(null);
-  const watch = useCustomerWatch(camera);
   const [leaveSeconds, setLeaveSeconds] = useState<number | null>(null);
-  const awayAt = useRef<number | null>(null);
   const endingVisit = useRef(false);
   const paused = useRef(false);
   const talk = useConversation({
@@ -482,56 +762,112 @@ export function Kiosk() {
     onStop: stopPlayback,
     onMiss: () => setNotice(screenText(languageRef.current.language, "mic_blocked")),
     onSilent: () => {
-      if (screenRef.current === "attract") setSay(screenText(languageRef.current.language, "hey_future"));
+      if (screenRef.current === "attract") setSay(t(languageRef.current.language, "didnt_catch"));
     },
     onVoice: setVoiceSample,
     isSpeaking: () => speakingNow.current,
   });
   const talkRef = useRef(talk);
   talkRef.current = talk;
+  stopTalkRef.current = () => talkRef.current.stop();
 
   useEffect(() => {
     if (!leading) {
       talkRef.current.stop();
       stopPlayback();
-      return;
     }
-    if (watch.present) {
-      if (!paused.current) talkRef.current.start();
-      return;
-    }
-    paused.current = false;
-    talkRef.current.stop();
-  }, [watch.present, leading]);
+  }, [leading]);
+
+  // Attract idle: prefetch welcome TTS for the current language into welcomeAudio.
+  useEffect(() => {
+    if (screen !== "attract") return;
+    prefetchWelcome(language, languagePinned);
+  }, [screen, language, languagePinned]);
+
+  // Menu with a complete cart: debounce warm read-back TTS so Review / checkout is cache-ready.
+  useEffect(() => {
+    if (session) invalidateReadBackCache(session.cartVersion);
+    if (opening) return;
+    if (!session || session.phase === "abandoned") return;
+    if (session.phase !== "browsing" && session.phase !== "drafting") return;
+    if (screen === "pay" || screen === "attract") return;
+    if (!cartReadyForReadBack(session)) return;
+    const lang: AppLanguage = isAppLanguage(session.preferredLanguage)
+      ? session.preferredLanguage
+      : language;
+    const sessionId = session.id;
+    const cartVersion = session.cartVersion;
+    const timer = window.setTimeout(() => {
+      prefetchReadBack(sessionId, cartVersion, lang);
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [session, screen, opening, language, languagePinned]);
+
+  // Review: debounce warm ready_to_pay TTS so Confirm / voice yes plays from cache.
+  useEffect(() => {
+    if (opening) return;
+    if (!session || session.phase !== "awaiting_confirmation") return;
+    if (screen !== "review") return;
+    if (!cartReadyForReadBack(session)) return;
+    const lang: AppLanguage = isAppLanguage(session.preferredLanguage)
+      ? session.preferredLanguage
+      : language;
+    const sessionId = session.id;
+    const cartVersion = session.cartVersion;
+    const timer = window.setTimeout(() => {
+      prefetchReadyPay(sessionId, cartVersion, lang);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [session, screen, opening, language, languagePinned]);
 
   const orderOpen = Boolean(session && session.phase !== "abandoned");
-  const faceAway = screen !== "attract" && watch.status === "looking";
-  const cameraBlind = screen !== "attract" && watch.status !== "looking" && watch.status !== "seen";
   const activityAt = session?.lastActivityAt ?? 0;
 
+  // Idle leave only: quiet window (BLIND_BEFORE_COUNTDOWN_MS) then LEAVE_COUNTDOWN_MS. Attract never counts down.
   useEffect(() => {
-    if (!faceAway && !cameraBlind) {
-      awayAt.current = null;
+    if (!orderOpen || screen === "attract") {
       endingVisit.current = false;
       setLeaveSeconds(null);
       return;
     }
-    if (!faceAway) awayAt.current = null;
-    else if (awayAt.current == null) awayAt.current = Date.now();
     const timer = window.setInterval(() => {
-      const elapsed = faceAway ? Date.now() - (awayAt.current ?? Date.now()) : Date.now() - activityAt;
-      const left = faceAway ? leaveSecondsLeft(elapsed) : leaveSecondsLeft(elapsed, BLIND_BEFORE_COUNTDOWN_MS);
+      const left = leaveSecondsLeft(Date.now() - activityAt, BLIND_BEFORE_COUNTDOWN_MS);
       setLeaveSeconds(left);
-      if (left === 0 && orderOpen && !endingVisit.current && liveSessionId.current) {
+      if (left === 0 && !endingVisit.current && liveSessionId.current) {
         endingVisit.current = true;
         void post(`/api/sessions/${liveSessionId.current}`, { type: "cancel" });
       }
     }, 250);
     return () => window.clearInterval(timer);
-  }, [faceAway, cameraBlind, orderOpen, screen, activityAt]);
+  }, [orderOpen, screen, activityAt]);
+
+  /**
+   * Demo Attract tap: paint menu + set machineId in the same gesture, kick welcome voice,
+   * then await session POST. Listening starts once the session is live.
+   */
+  function beginFromMachine(machineId: MachineId) {
+    paused.current = false;
+    setHeard(null);
+    const choice = languageRef.current;
+    setSay(t(choice.language, "welcome_choose"));
+    // Optimistic menu: do not gate paint on the session round trip.
+    setOpening(true);
+    setMenu(machineId);
+    setShowMenu(true);
+    show("menu");
+    // Unlock playback inside the tap gesture; welcome TTS runs beside the session POST.
+    void audioContext().resume();
+    speakWelcome(choice.language, choice.pinned);
+    void (async () => {
+      await start(machineId);
+      setOpening(false);
+      if (liveSessionId.current) talk.start();
+    })();
+  }
 
   function onTalk() {
-    watch.enable();
+    // Do not open the mic until the session is live (opening menu has no session id yet).
+    if (opening || !liveSessionId.current) return;
     if (talk.phase === "off") {
       paused.current = false;
       talk.start();
@@ -552,36 +888,12 @@ export function Kiosk() {
         say={say}
         heard={heard}
         notice={notice}
-        speaking={speaking}
-        talkPhase={talk.phase}
-        onToggleTalk={onTalk}
-        onStart={() => show("machines")}
-        thinking={thinking}
         language={language}
-        languageOpen={languageOpen}
-        onToggleLanguage={() => setLanguageOpen((open) => !open)}
         onChooseLanguage={chooseLanguage}
+        onSelectMachine={beginFromMachine}
       />
     );
-  } else if (screen === "machines" || !orderLive || !session) {
-    body = (
-      <MachineChoice
-        say={say}
-        heard={heard}
-        speaking={speaking}
-        talkPhase={talk.phase}
-        onToggleTalk={onTalk}
-        onBack={() => {
-          setHeard(null);
-          setSay(null);
-          show("attract");
-        }}
-        onStart={openMachine}
-        thinking={thinking}
-        language={language}
-      />
-    );
-  } else if (screen === "pay" && readBack) {
+  } else if (screen === "pay" && readBack && session) {
     body = (
       <Pay
         readBack={readBack}
@@ -589,6 +901,7 @@ export function Kiosk() {
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
+        voiceSample={voiceSample}
         onToggleTalk={onTalk}
         onSend={send}
         onChange={() => void run({ type: "revise" })}
@@ -598,7 +911,7 @@ export function Kiosk() {
         language={language}
       />
     );
-  } else if (screen === "review" && readBack) {
+  } else if (screen === "review" && readBack && session) {
     body = (
       <Review
         readBack={readBack}
@@ -607,19 +920,60 @@ export function Kiosk() {
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
+        voiceSample={voiceSample}
         onToggleTalk={onTalk}
         onSend={send}
-        onConfirm={() =>
+        onConfirm={() => {
+          paintPayOptimistic();
           void run({
             type: "confirm",
             cartVersion: readBack.cartVersion,
             source: "confirm_tap",
-          })
-        }
+          });
+        }}
         onChange={() => void run({ type: "revise" })}
         onBack={stepBack}
         thinking={thinking}
         language={language}
+      />
+    );
+  } else if (screen === "menu" && menu) {
+    body = (
+      <Menu
+        session={session && session.phase !== "abandoned" ? session : null}
+        menu={menu}
+        opening={opening}
+        notice={notice}
+        say={say}
+        heard={heard}
+        speaking={speaking}
+        talkPhase={talk.phase}
+        voiceSample={voiceSample}
+        onToggleTalk={onTalk}
+        spotlightIds={spotlightIds}
+        uiPulse={uiPulse}
+        onSend={send}
+        onCancel={cancel}
+        onBack={stepBack}
+        onPick={(productId) => setPicker({ productId })}
+        onEditTemp={(lineId, productId) => setPicker({ lineId, productId })}
+        onQuantity={(lineId, quantity) => void run({ type: "set_quantity", lineId, quantity })}
+        onSetTemp={(lineId, temperature) => void run({ type: "set_temperature", lineId, temperature })}
+        onRemove={(lineId) => void run({ type: "remove_line", lineId })}
+        onReview={() => void run({ type: "read_back" })}
+        thinking={thinking}
+        language={language}
+      />
+    );
+  } else if (!orderLive || !session) {
+    body = (
+      <Attract
+        say={say}
+        heard={heard}
+        notice={notice}
+        language={language}
+        onChooseLanguage={chooseLanguage}
+        onSelectMachine={beginFromMachine}
       />
     );
   } else {
@@ -627,12 +981,13 @@ export function Kiosk() {
       <Menu
         session={session}
         menu={menu ?? session.machineId}
-        onMenu={setMenu}
+        opening={false}
         notice={notice}
         say={say}
         heard={heard}
         speaking={speaking}
         talkPhase={talk.phase}
+        voiceSample={voiceSample}
         onToggleTalk={onTalk}
         spotlightIds={spotlightIds}
         uiPulse={uiPulse}
@@ -664,18 +1019,6 @@ export function Kiosk() {
         aria-busy={thinking || undefined}
       >
         <div className={leaving ? styles.screenBlur : styles.screenFace}>
-        <video
-          ref={setCamera}
-          className={watch.status === "looking" || watch.status === "seen" || watch.status === "starting" ? styles.camera : styles.cameraHidden}
-          muted
-          playsInline
-          aria-label="Camera looking for a customer"
-        />
-        {cameraText(watch.status, language) ? (
-          <p className={watch.status === "looking" || watch.status === "seen" ? styles.cameraNoteOn : styles.cameraNote}>
-            {cameraText(watch.status, language)}
-          </p>
-        ) : null}
         {body}
         {item && session && session.phase !== "abandoned" && session.phase !== "ready_to_pay" ? (
           <ProductSheet
@@ -710,7 +1053,6 @@ export function Kiosk() {
             }}
           />
         ) : null}
-        {talk.phase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
         </div>
         {leaving ? (
           <LeaveRing
@@ -745,188 +1087,161 @@ function LeaveRing({ seconds, label }: { seconds: number; label: string }) {
   );
 }
 
+/** Shown in the Attract status strip. Production units set NEXT_PUBLIC_UNIT_ID; the demo shows a placeholder. */
+const UNIT_ID = process.env.NEXT_PUBLIC_UNIT_ID?.trim() || "DEMO-01";
+/** How long an early orb tap keeps the “Pick a machine below” nudge + card pulse on screen. */
+const ATTRACT_NUDGE_MS = 3200;
+
+const ATTRACT_PICKS: { id: MachineId; image: string; blurb: "coffee_blurb" | "snacks_blurb"; tone: "cyan" | "magenta" }[] = [
+  { id: "coffee", image: "/images/coffee/coffee-01.webp", blurb: "coffee_blurb", tone: "cyan" },
+  { id: "snacks", image: "/images/snacks/snacks-01.webp", blurb: "snacks_blurb", tone: "magenta" },
+];
+
+/**
+ * Demo home screen. The machine cards are the only real start: whole card / Start Order →
+ * onSelectMachine (Engineer's beginFromMachine: optimistic menu + welcome + listening).
+ * Attract orb never opens the mic — early tap only nudges “Pick a machine below”. Label is “Choose a machine”, not Tap/Speak.
+ */
 function Attract({
   say,
   heard,
   notice,
-  speaking,
-  talkPhase,
-  onToggleTalk,
-  onStart,
-  thinking,
   language,
-  languageOpen,
-  onToggleLanguage,
   onChooseLanguage,
+  onSelectMachine,
 }: {
   say: string | null;
   heard: string | null;
   notice: string | null;
-  speaking: boolean;
-  talkPhase: TalkPhase;
-  onToggleTalk: () => void;
-  onStart: () => void;
-  thinking: boolean;
   language: AppLanguage;
-  languageOpen: boolean;
-  onToggleLanguage: () => void;
   onChooseLanguage: (language: AppLanguage) => void;
+  onSelectMachine: (id: MachineId) => void;
 }) {
+  const [nudge, setNudge] = useState(0);
+  const cardsRef = useRef<HTMLDivElement>(null);
+  const nudging = nudge > 0;
+
+  useEffect(() => {
+    if (!nudge) return;
+    cardsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    const timer = window.setTimeout(() => setNudge(0), ATTRACT_NUDGE_MS);
+    return () => window.clearTimeout(timer);
+  }, [nudge]);
+
   return (
     <div className={styles.attract}>
-      <img className={styles.logo} src="/brand/futureino-logo-trimmed.png" alt="Futureino" />
-      <h1 className={styles.welcome}>{screenText(language, "welcome")}</h1>
-      <div className={styles.attractHero}>
-        <Reply say={say} heard={heard} language={language} />
-        {notice ? <p className={styles.notice}>{notice}</p> : null}
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} circle language={language} startLabel={screenText(language, "tap_to_start")} />
-        <p className={styles.attractHint}>{screenText(language, "hey_future")}</p>
-        <button type="button" className={styles.attractBrowse} onClick={onStart} disabled={thinking}>
-          {screenText(language, "browse")}
-        </button>
-        <LanguageButton
-          language={language}
-          open={languageOpen}
-          onToggle={onToggleLanguage}
-          onChoose={onChooseLanguage}
-        />
-      </div>
-    </div>
-  );
-}
-
-function LanguageButton({
-  language,
-  open,
-  onToggle,
-  onChoose,
-}: {
-  language: AppLanguage;
-  open: boolean;
-  onToggle: () => void;
-  onChoose: (language: AppLanguage) => void;
-}) {
-  const current = LANGUAGES.find((item) => item.id === language) ?? LANGUAGES[0];
-  const code = current?.code ?? "EN";
-  const label = current ? `Language, ${current.label}` : "Language";
-  return (
-    <div className={styles.langDock}>
-      {open ? (
-        <div className={styles.langMenu} role="listbox" aria-label="Language">
+      <header className={styles.attractHead}>
+        <div className={styles.brand}>
+          <img className={styles.brandLogo} src="/brand/futureino-logo-clear.png" alt="Futureino" />
+          <span className={styles.brandTag}>{screenText(language, "smart_kiosk")}</span>
+        </div>
+        <div className={styles.langChips} role="group" aria-label={screenText(language, "language")}>
           {LANGUAGES.map((option) => (
             <button
               key={option.id}
               type="button"
-              role="option"
-              aria-selected={option.id === language}
-              className={option.id === language ? styles.langOptionOn : styles.langOption}
-              onClick={() => onChoose(option.id)}
+              lang={option.id}
+              className={option.id === language ? styles.langChipOn : styles.langChip}
+              aria-pressed={option.id === language}
+              aria-label={option.label}
+              title={option.label}
+              onClick={() => onChooseLanguage(option.id)}
             >
-              <span className={styles.langCode}>{option.code}</span>
-              <span dir="auto">{option.label}</span>
+              {option.code}
             </button>
           ))}
         </div>
-      ) : null}
-      <button
-        type="button"
-        className={open ? styles.langButtonOn : styles.langButton}
-        aria-expanded={open}
-        aria-label={label}
-        onClick={onToggle}
-      >
-        {code}
-      </button>
-    </div>
-  );
-}
+      </header>
 
-function MachineChoice({
-  say,
-  heard,
-  speaking,
-  talkPhase,
-  onToggleTalk,
-  onBack,
-  onStart,
-  thinking,
-  language,
-}: {
-  say: string | null;
-  heard: string | null;
-  speaking: boolean;
-  talkPhase: TalkPhase;
-  onToggleTalk: () => void;
-  onBack: () => void;
-  onStart: (machineId: MachineId) => void;
-  thinking: boolean;
-  language: AppLanguage;
-}) {
-  const live = talkPhase !== "off" || speaking || Boolean(heard) || Boolean(say);
-  const art: Record<MachineId, string> = {
-    coffee: "/images/coffee/coffee-01.webp",
-    snacks: "/images/snacks/snacks-01.webp",
-  };
-  const sayWord: Record<MachineId, string> = {
-    coffee: screenText(language, "say_coffee"),
-    snacks: screenText(language, "say_snacks"),
-  };
-  const blurb: Record<MachineId, string> = {
-    coffee: screenText(language, "coffee_blurb"),
-    snacks: screenText(language, "snacks_blurb"),
-  };
-  const idle =
-    talkPhase === "listening"
-      ? screenText(language, "listening")
-      : talkPhase === "thinking"
-        ? screenText(language, "thinking")
-        : speaking
-          ? screenText(language, "speaking")
-          : screenText(language, "tap_mic");
-
-  return (
-    <div className={styles.choose}>
-      <div className={styles.chooseHead}>
-        <h1 className={styles.chooseTitle}>{screenText(language, "what_after")}</h1>
-        <div className={styles.voiceRow} data-live={live || undefined}>
-          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} mic language={language} />
-          <div className={styles.voiceTranscript} role="status">
-            {heard ? (
-              <p className={styles.heard}>{screenText(language, "you_said", { text: heard })}</p>
-            ) : say ? (
-              <p className={styles.sayLine}>{say}</p>
-            ) : (
-              <p className={styles.voiceIdle}>{idle}</p>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className={styles.machineCards}>
-        {(Object.keys(MACHINES) as MachineId[]).map((id) => (
-          <button
-            key={id}
-            type="button"
-            className={styles.machineCard}
-            onClick={() => onStart(id)}
-            disabled={thinking}
-          >
-            <span className={styles.machineArt} aria-hidden>
-              <img src={art[id]} alt="" />
-            </span>
-            <span className={styles.machineBody}>
-              <strong>{MACHINES[id].name}</strong>
-              <span className={styles.machineBlurb}>{blurb[id]}</span>
-              <span className={styles.sayHint}>{sayWord[id]}</span>
-            </span>
-          </button>
-        ))}
-      </div>
-      <div className={styles.chooseFoot}>
-        <button type="button" className={styles.backBtn} onClick={onBack} disabled={thinking}>
-          {screenText(language, "back")}
+      <section className={styles.orbStage} aria-label={screenText(language, "tap_or_speak")}>
+        <button
+          type="button"
+          className={nudging ? `${styles.orb} ${styles.orbNudge}` : styles.orb}
+          aria-describedby="attract-orb-hint"
+          onClick={() => setNudge((count) => count + 1)}
+        >
+          <span className={styles.orbHalo} aria-hidden />
+          <span className={styles.orbCore}>
+            <span className={styles.orbLabel}>{screenText(language, "tap_or_speak")}</span>
+          </span>
         </button>
-        <p className={styles.orSay}>{screenText(language, "or_say_back")}</p>
+        <p id="attract-orb-hint" className={styles.orbHint}>
+          {screenText(language, "orb_hint")}
+        </p>
+      </section>
+
+      <div className={styles.attractTranscript} role="status" aria-live="polite">
+        {nudging ? (
+          <p className={styles.attractNudge}>{screenText(language, "pick_machine_below")}</p>
+        ) : heard || say ? (
+          <>
+            {heard ? <p className={styles.attractHeard}>{screenText(language, "you_said", { text: heard })}</p> : null}
+            {say ? <p className={styles.attractSay}>{say}</p> : null}
+          </>
+        ) : (
+          <p className={styles.attractExample}>{screenText(language, "example_order")}</p>
+        )}
       </div>
+
+      {notice ? (
+        <p className={styles.attractNotice} role="alert">
+          {notice}
+        </p>
+      ) : null}
+
+      <p className={styles.demoLine}>{screenText(language, "demo_choose")}</p>
+      <div ref={cardsRef} className={styles.machineRow} data-nudge={nudging ? "true" : "false"}>
+        {ATTRACT_PICKS.map((pick, index) => {
+          const meta = MACHINES[pick.id];
+          const blurb = screenText(language, pick.blurb);
+          const cta = screenText(language, "start_order");
+          return (
+            <button
+              key={pick.id}
+              type="button"
+              className={styles.machineCard}
+              data-tone={pick.tone}
+              style={{ animationDelay: `${120 + index * 120}ms` }}
+              aria-label={`${meta.name}. ${blurb}. ${cta}`}
+              onClick={() => onSelectMachine(pick.id)}
+            >
+              <span className={styles.machineArt}>
+                <img src={pick.image} alt="" />
+              </span>
+              <span className={styles.machineTitle}>{meta.name}</span>
+              <span className={styles.machineBlurb}>{blurb}</span>
+              <span className={styles.machineCta} aria-hidden>
+                {cta}
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+                  <path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </button>
+          );
+        })}
+      </div>
+
+      <footer className={styles.attractFoot}>
+        <p className={styles.noisyTip}>
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" aria-hidden>
+            <path d="M4 10v4h3l4 4V6L7 10H4Z" fill="currentColor" />
+            <path d="M15 9.5a3.5 3.5 0 0 1 0 5M17.5 7a7 7 0 0 1 0 10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+          </svg>
+          <span>{screenText(language, "noisy_tip")}</span>
+        </p>
+        <p className={styles.unitStatus}>
+          <span className={styles.statusDot} aria-hidden />
+          <span>{screenText(language, "voice_touch")}</span>
+          <span className={styles.statusSep} aria-hidden>
+            |
+          </span>
+          <span>{screenText(language, "unit", { id: UNIT_ID })}</span>
+          <span className={styles.statusSep} aria-hidden>
+            |
+          </span>
+          <span>{(LANGUAGES.find((option) => option.id === language) ?? LANGUAGES[0]).code}</span>
+        </p>
+      </footer>
     </div>
   );
 }
@@ -934,12 +1249,13 @@ function MachineChoice({
 function Menu({
   session,
   menu,
-  onMenu,
+  opening,
   notice,
   say,
   heard,
   speaking,
   talkPhase,
+  voiceSample,
   onToggleTalk,
   spotlightIds,
   uiPulse,
@@ -955,14 +1271,16 @@ function Menu({
   thinking,
   language,
 }: {
-  session: OrderSession;
+  session: OrderSession | null;
   menu: MachineId;
-  onMenu: (machineId: MachineId) => void;
+  /** True until the session POST lands — UI Designer binds skeleton chrome to this. */
+  opening: boolean;
   notice: string | null;
   say: string | null;
   heard: string | null;
   speaking: boolean;
   talkPhase: TalkPhase;
+  voiceSample: VoiceSample | null;
   onToggleTalk: () => void;
   spotlightIds: string[];
   uiPulse: { command: UiCommand; id: number } | null;
@@ -979,14 +1297,18 @@ function Menu({
   language: AppLanguage;
 }) {
   const products = itemsForMachine(menu);
+  const lines = session?.lines ?? [];
   const missing = new Set(
-    session.lines.filter((line) => getItem(line.productId)?.requiresTemperature && !line.temperature).map((line) => line.lineId),
+    lines.filter((line) => getItem(line.productId)?.requiresTemperature && !line.temperature).map((line) => line.lineId),
   );
-  const count = session.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const count = lines.reduce((sum, line) => sum + line.quantity, 0);
   const [cartOpen, setCartOpen] = useState(false);
   const [typeOpen, setTypeOpen] = useState(false);
+  /** Touch CTAs / composer / cart qty — default closed for pure conversation. */
+  const [controlsOpen, setControlsOpen] = useState(false);
   const gridRef = useRef<HTMLDivElement>(null);
   const spotlightKey = spotlightIds.join("|");
+  const busy = thinking || opening || !session;
 
   useEffect(() => {
     if (!spotlightIds.length || !gridRef.current) return;
@@ -1011,183 +1333,209 @@ function Menu({
 
   const missingKey = [...missing].sort().join("|");
   useEffect(() => {
-    if (session.lines.length === 0) setCartOpen(false);
-  }, [session.lines.length]);
+    if (lines.length === 0) setCartOpen(false);
+  }, [lines.length]);
   useEffect(() => {
-    if (missing.size > 0) setCartOpen(true);
+    if (missing.size > 0) {
+      setCartOpen(true);
+      setControlsOpen(true);
+    }
   }, [missingKey, missing.size]);
 
-  const total = cartTotal(session);
+  const total = session ? cartTotal(session) : 0;
   const networkFail = isNetworkNotice(notice);
 
   return (
-    <>
+    <div className={styles.menuView}>
       <header className={styles.topbar}>
-        <div>
-          <p>Futureino</p>
+        <div className={styles.menuBrand}>
+          <img className={styles.menuLogo} src="/brand/futureino-logo-clear.png" alt="Futureino" />
           <h2>{MACHINES[menu].name}</h2>
-          <div className={styles.menus}>
-            {(Object.keys(MACHINES) as MachineId[]).map((id) => (
-              <button
-                key={id}
-                type="button"
-                className={id === menu ? styles.menuOn : styles.menuOff}
-                aria-pressed={id === menu}
-                onClick={() => onMenu(id)}
-                disabled={thinking}
-              >
-                {MACHINES[id].name}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className={styles.menus}>
-          <button type="button" className={styles.linkish} onClick={onBack} disabled={thinking}>
-            {screenText(language, "back")}
-          </button>
-          <button type="button" className={styles.linkish} onClick={onCancel} disabled={thinking}>
-            {screenText(language, "start_over")}
-          </button>
         </div>
       </header>
       <Reply say={say} heard={heard} language={language} />
       <div
         ref={gridRef}
-        className={thinking ? `${styles.grid} ${styles.gridBusy}` : styles.grid}
-        aria-busy={thinking || undefined}
+        className={thinking || opening ? `${styles.grid} ${styles.gridBusy}` : styles.grid}
+        aria-busy={thinking || opening || undefined}
+        data-opening={opening ? "true" : "false"}
       >
-        {products.map((product) => (
-          <button
-            key={product.id}
-            type="button"
-            data-product-id={product.id}
-            className={spotlightIds.includes(product.id) ? `${styles.card} ${styles.spot}` : styles.card}
-            onClick={() => onPick(product.id)}
-            disabled={thinking}
-          >
-            <img src={`/${product.imagePath}`} alt="" />
-            <span className={styles.cardName}>{product.name}</span>
-            <span className={styles.cardPrice}>{money(product.priceCents)}</span>
-          </button>
-        ))}
+        {opening
+          ? Array.from({ length: 6 }, (_, index) => (
+              <div key={`open-skel-${index}`} className={styles.cardSkeleton} aria-hidden>
+                <div className={styles.skeletonThumb} />
+                <div className={styles.skeletonLine} />
+                <div className={`${styles.skeletonLine} ${styles.skeletonLineShort}`} />
+              </div>
+            ))
+          : products.map((product) => (
+              <article
+                key={product.id}
+                data-product-id={product.id}
+                className={spotlightIds.includes(product.id) ? `${styles.card} ${styles.spot}` : styles.card}
+              >
+                <img src={`/${product.imagePath}`} alt="" />
+                <span className={styles.cardName}>{product.name}</span>
+                <span className={styles.cardPrice}>{money(product.priceCents)}</span>
+                <button
+                  type="button"
+                  className={styles.addPill}
+                  onClick={() => onPick(product.id)}
+                  disabled={busy}
+                >
+                  {product.requiresTemperature
+                    ? screenText(language, "add_custom")
+                    : screenText(language, "add")}
+                </button>
+              </article>
+            ))}
       </div>
-      <footer className={styles.dock} aria-label="Cart">
-        {count === 0 ? (
-          <p className={styles.empty}>{screenText(language, "tap_add")}</p>
-        ) : (
-          <button
-            type="button"
-            className={styles.cartSummary}
-            aria-expanded={cartOpen}
-            onClick={() => setCartOpen((open) => !open)}
-            disabled={thinking}
-          >
-            <span>
-              {screenText(language, count === 1 ? "item_one" : "item_many", { count })} · {money(total)}
-              {missing.size > 0 ? ` · ${screenText(language, "needs_temp")}` : ""}
-            </span>
-            <span className={styles.cartChevron} aria-hidden>
-              {cartOpen ? "▾" : "▸"}
-            </span>
-          </button>
-        )}
-        {cartOpen && session.lines.length > 0 ? (
-          <div className={styles.lines}>
-            {session.lines.map((line) => {
-              const product = getItem(line.productId);
-              const unit = product?.priceCents ?? 0;
-              return (
-                <div key={line.lineId} className={styles.line}>
-                  <strong>
-                    {product?.name ?? line.productId}
-                    {line.quantity > 1 ? ` × ${line.quantity}` : ""}
-                  </strong>
-                  <span className={styles.price}>{money(unit * line.quantity)}</span>
-                  {line.temperature ? (
-                    <button
-                      type="button"
-                      className={styles.meta}
-                      onClick={() => onEditTemp(line.lineId, line.productId)}
-                      disabled={thinking}
-                    >
-                      {line.temperature ? tempWord(language, line.temperature) : ""}
-                    </button>
-                  ) : null}
-                  {missing.has(line.lineId) ? (
-                    <div className={styles.tempPick} role="group" aria-label={tempWord(language, "hot")}>
-                      {TEMP_IDS.map((temp) => (
-                        <button
-                          key={temp}
-                          type="button"
-                          onClick={() => onSetTemp(line.lineId, temp)}
-                          disabled={thinking}
-                        >
-                          {tempWord(language, temp)}
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-                  <div className={styles.qty}>
-                    <button
-                      type="button"
-                      aria-label={`Decrease ${product?.name ?? "item"}`}
-                      onClick={() => onQuantity(line.lineId, line.quantity - 1)}
-                      disabled={thinking || line.quantity <= 1}
-                    >
-                      −
-                    </button>
-                    <span>{line.quantity}</span>
-                    <button
-                      type="button"
-                      aria-label={`Increase ${product?.name ?? "item"}`}
-                      onClick={() => onQuantity(line.lineId, line.quantity + 1)}
-                      disabled={thinking || line.quantity >= 9}
-                    >
-                      +
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.remove}
-                      onClick={() => onRemove(line.lineId)}
-                      disabled={thinking}
-                    >
-                      {screenText(language, "remove")}
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+      <footer className={styles.dock} aria-label="Cart" data-opening={opening ? "true" : "false"}>
+        {count > 0 ? (
+          <p className={styles.cartStatus} role="status">
+            {screenText(language, count === 1 ? "item_one" : "item_many", { count })} · {money(total)}
+            {missing.size > 0 ? ` · ${screenText(language, "needs_temp")}` : ""}
+          </p>
         ) : null}
         {notice ? (
           <p className={networkFail ? `${styles.notice} ${styles.noticeFail}` : styles.notice} role="status">
             {notice}
           </p>
         ) : null}
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact language={language} />
-        <p className={styles.orSay}>{screenText(language, "menu_hint")}</p>
-        {typeOpen ? (
-          <Composer onSend={onSend} disabled={thinking} onClose={() => setTypeOpen(false)} language={language} />
-        ) : (
-          <button
-            type="button"
-            className={styles.typeInstead}
-            onClick={() => setTypeOpen(true)}
-            disabled={thinking}
-          >
-            {screenText(language, "type_instead")}
-          </button>
-        )}
+        <div className={styles.voiceRow}>
+          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact language={language} />
+          {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
+        </div>
+        {controlsOpen ? (
+          <div className={styles.controlsPanel}>
+            {count === 0 ? (
+              <p className={styles.empty}>{screenText(language, "tap_add")}</p>
+            ) : (
+              <button
+                type="button"
+                className={styles.cartSummary}
+                aria-expanded={cartOpen}
+                onClick={() => setCartOpen((open) => !open)}
+                disabled={busy}
+              >
+                <span>
+                  {screenText(language, count === 1 ? "item_one" : "item_many", { count })} · {money(total)}
+                  {missing.size > 0 ? ` · ${screenText(language, "needs_temp")}` : ""}
+                </span>
+                <span className={styles.cartChevron} aria-hidden>
+                  {cartOpen ? "▾" : "▸"}
+                </span>
+              </button>
+            )}
+            {cartOpen && lines.length > 0 ? (
+              <div className={styles.lines}>
+                {lines.map((line) => {
+                  const product = getItem(line.productId);
+                  const unit = product?.priceCents ?? 0;
+                  return (
+                    <div key={line.lineId} className={styles.line}>
+                      <strong>
+                        {product?.name ?? line.productId}
+                        {line.quantity > 1 ? ` × ${line.quantity}` : ""}
+                      </strong>
+                      <span className={styles.price}>{money(unit * line.quantity)}</span>
+                      {line.temperature ? (
+                        <button
+                          type="button"
+                          className={styles.meta}
+                          onClick={() => onEditTemp(line.lineId, line.productId)}
+                          disabled={busy}
+                        >
+                          {line.temperature ? tempWord(language, line.temperature) : ""}
+                        </button>
+                      ) : null}
+                      {missing.has(line.lineId) ? (
+                        <div className={styles.tempPick} role="group" aria-label={tempWord(language, "hot")}>
+                          {TEMP_IDS.map((temp) => (
+                            <button
+                              key={temp}
+                              type="button"
+                              onClick={() => onSetTemp(line.lineId, temp)}
+                              disabled={busy}
+                            >
+                              {tempWord(language, temp)}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className={styles.qty}>
+                        <button
+                          type="button"
+                          aria-label={`Decrease ${product?.name ?? "item"}`}
+                          onClick={() => onQuantity(line.lineId, line.quantity - 1)}
+                          disabled={busy || line.quantity <= 1}
+                        >
+                          −
+                        </button>
+                        <span>{line.quantity}</span>
+                        <button
+                          type="button"
+                          aria-label={`Increase ${product?.name ?? "item"}`}
+                          onClick={() => onQuantity(line.lineId, line.quantity + 1)}
+                          disabled={busy || line.quantity >= 9}
+                        >
+                          +
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.remove}
+                          onClick={() => onRemove(line.lineId)}
+                          disabled={busy}
+                        >
+                          {screenText(language, "remove")}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : null}
+            <p className={styles.orSay}>{screenText(language, "menu_hint")}</p>
+            {typeOpen ? (
+              <Composer onSend={onSend} disabled={busy} onClose={() => setTypeOpen(false)} language={language} />
+            ) : (
+              <button
+                type="button"
+                className={styles.typeInstead}
+                onClick={() => setTypeOpen(true)}
+                disabled={busy}
+              >
+                {screenText(language, "type_instead")}
+              </button>
+            )}
+            <button
+              type="button"
+              className={styles.primary}
+              onClick={onReview}
+              disabled={busy || count === 0 || missing.size > 0}
+            >
+              {count === 0 ? screenText(language, "review_order") : screenText(language, "review_total", { total: money(total) })}
+            </button>
+            <div className={styles.controlsNav}>
+              <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
+                {screenText(language, "back")}
+              </button>
+              <button type="button" className={styles.ghost} onClick={onCancel} disabled={thinking}>
+                {screenText(language, "start_over")}
+              </button>
+            </div>
+          </div>
+        ) : null}
         <button
           type="button"
-          className={styles.primary}
-          onClick={onReview}
-          disabled={thinking || count === 0 || missing.size > 0}
+          className={styles.expandToggle}
+          aria-expanded={controlsOpen}
+          onClick={() => setControlsOpen((open) => !open)}
         >
-          {count === 0 ? screenText(language, "review_order") : screenText(language, "review_total", { total: money(total) })}
+          {controlsOpen ? screenText(language, "collapse") : screenText(language, "expand")}
         </button>
       </footer>
-    </>
+    </div>
   );
 }
 
@@ -1265,6 +1613,7 @@ function Review({
   heard,
   speaking,
   talkPhase,
+  voiceSample,
   onToggleTalk,
   onSend,
   onConfirm,
@@ -1279,6 +1628,7 @@ function Review({
   heard: string | null;
   speaking: boolean;
   talkPhase: TalkPhase;
+  voiceSample: VoiceSample | null;
   onToggleTalk: () => void;
   onSend: (text: string) => void;
   onConfirm: () => void;
@@ -1288,6 +1638,7 @@ function Review({
   language: AppLanguage;
 }) {
   const networkFail = isNetworkNotice(notice);
+  const [controlsOpen, setControlsOpen] = useState(false);
   return (
     <div className={styles.review}>
       <div>
@@ -1321,17 +1672,32 @@ function Review({
             {notice}
           </p>
         ) : null}
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} language={language} />
-        <p className={styles.orSay}>{screenText(language, "say_back_page")}</p>
-        <Composer onSend={onSend} disabled={thinking} modest language={language} />
-        <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
-          {screenText(language, "back")}
-        </button>
-        <button type="button" className={styles.primary} onClick={onConfirm} disabled={thinking}>
-          {screenText(language, "confirm")}
-        </button>
-        <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
-          {screenText(language, "change_order")}
+        <div className={styles.voiceRow}>
+          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} language={language} />
+          {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
+        </div>
+        {controlsOpen ? (
+          <div className={styles.controlsPanel}>
+            <p className={styles.orSay}>{screenText(language, "say_back_page")}</p>
+            <Composer onSend={onSend} disabled={thinking} modest language={language} />
+            <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
+              {screenText(language, "back")}
+            </button>
+            <button type="button" className={styles.primary} onClick={onConfirm} disabled={thinking}>
+              {screenText(language, "confirm")}
+            </button>
+            <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
+              {screenText(language, "change_order")}
+            </button>
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className={styles.expandToggle}
+          aria-expanded={controlsOpen}
+          onClick={() => setControlsOpen((open) => !open)}
+        >
+          {controlsOpen ? screenText(language, "collapse") : screenText(language, "expand")}
         </button>
       </div>
     </div>
@@ -1344,6 +1710,7 @@ function Pay({
   heard,
   speaking,
   talkPhase,
+  voiceSample,
   onToggleTalk,
   onSend,
   onChange,
@@ -1357,6 +1724,7 @@ function Pay({
   heard: string | null;
   speaking: boolean;
   talkPhase: TalkPhase;
+  voiceSample: VoiceSample | null;
   onToggleTalk: () => void;
   onSend: (text: string) => void;
   onChange: () => void;
@@ -1365,51 +1733,161 @@ function Pay({
   thinking: boolean;
   language: AppLanguage;
 }) {
+  /** Demo display-only split. TOTAL DUE stays catalog `totalCents` (operator/readBack truth). */
+  const totalCents = readBack.totalCents;
+  const taxCents = Math.round(totalCents * 0.08);
+  const subtotalCents = totalCents - taxCents;
+  const itemCount = readBack.lines.reduce((sum, line) => sum + line.quantity, 0);
+  const [method, setMethod] = useState<"card" | "mobile" | "loyalty">("card");
+  const [controlsOpen, setControlsOpen] = useState(false);
+
   return (
     <div className={styles.pay}>
-      <div>
-        <p className={styles.kicker}>{screenText(language, "ready_pay")}</p>
-        <h1 className={styles.title}>{screenText(language, "pay_here")}</h1>
-        <p className={styles.payTotal}>{money(readBack.totalCents)}</p>
-        <p className={styles.summary}>{screenText(language, "pay_stops")}</p>
-        <Reply say={say} heard={heard} language={language} />
-        <ul className={styles.reviewList}>
+      <header className={styles.payHead}>
+        <img className={styles.payLogo} src="/brand/futureino-logo-clear.png" alt="Futureino" />
+      </header>
+      <Reply say={say} heard={heard} language={language} />
+      <div className={styles.payBody}>
+        <h2 className={styles.payCartTitle}>
+          {screenText(language, itemCount === 1 ? "your_cart_one" : "your_cart", { count: itemCount })}
+        </h2>
+        <ul className={styles.payCartList}>
           {readBack.lines.map((line) => (
-            <li key={line.lineId}>
-              <span>
-                {line.name}
-                {line.temperature ? ` · ${tempWord(language, line.temperature)}` : ""}
-                {line.quantity > 1 ? ` × ${line.quantity}` : ""}
+            <li key={line.lineId} className={styles.payCartLine}>
+              <span className={styles.payCartMeta}>
+                <span className={styles.payCartName}>{line.name}</span>
+                {line.temperature ? (
+                  <span className={styles.payCartDot}> · {tempWord(language, line.temperature)}</span>
+                ) : null}
+                <span className={styles.payCartDot}> · ×{line.quantity}</span>
               </span>
-              <span className={styles.price}>{money(line.lineTotalCents)}</span>
+              <span className={styles.payCartPrice}>{money(line.lineTotalCents)}</span>
             </li>
           ))}
         </ul>
+        <div className={styles.payBreakdown}>
+          <div className={styles.payRow}>
+            <span>{screenText(language, "subtotal")}</span>
+            <span>{money(subtotalCents)}</span>
+          </div>
+          <div className={styles.payRow}>
+            <span>{screenText(language, "tax")}</span>
+            <span>{money(taxCents)}</span>
+          </div>
+          <div className={styles.payDue} role="status">
+            <span>{screenText(language, "total_due")}</span>
+            <span>{money(totalCents)}</span>
+          </div>
+        </div>
+        <p className={styles.payMethodLabel}>{screenText(language, "select_payment")}</p>
+        <div className={styles.payMethods} role="radiogroup" aria-label={screenText(language, "select_payment")}>
+          {(
+            [
+              { id: "card" as const, label: "pay_card" as const, icon: "card" },
+              { id: "mobile" as const, label: "pay_mobile" as const, icon: "mobile" },
+              { id: "loyalty" as const, label: "pay_loyalty" as const, icon: "loyalty" },
+            ] as const
+          ).map((tile) => (
+            <button
+              key={tile.id}
+              type="button"
+              role="radio"
+              aria-checked={method === tile.id}
+              className={method === tile.id ? `${styles.payMethod} ${styles.payMethodOn}` : styles.payMethod}
+              onClick={() => setMethod(tile.id)}
+              disabled={thinking}
+            >
+              <PayMethodIcon kind={tile.icon} />
+              <span>{screenText(language, tile.label)}</span>
+            </button>
+          ))}
+        </div>
+        <p className={styles.payDemoNote}>{screenText(language, "pay_stops")}</p>
       </div>
-      <div className={styles.stack}>
-        <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} language={language} />
-        <p className={styles.orSay}>{screenText(language, "say_back_page")}</p>
-        <Composer onSend={onSend} disabled={thinking} modest language={language} />
-        <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
-          {screenText(language, "back")}
-        </button>
-        <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
-          {screenText(language, "change_order")}
-        </button>
-        <button type="button" className={styles.primary} onClick={onNew} disabled={thinking}>
-          {screenText(language, "new_order")}
+      <div className={styles.payDock}>
+        <div className={styles.voiceRow}>
+          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} language={language} />
+          {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
+        </div>
+        <p className={styles.payUnit}>{screenText(language, "unit", { id: UNIT_ID })}</p>
+        <p className={styles.payHint}>{screenText(language, "say_confirm_pay")}</p>
+        {controlsOpen ? (
+          <div className={styles.controlsPanel}>
+            <Composer onSend={onSend} disabled={thinking} modest language={language} />
+            <div className={styles.payActions}>
+              <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
+                {screenText(language, "back")}
+              </button>
+              <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
+                {screenText(language, "change_order")}
+              </button>
+              <button type="button" className={styles.primary} onClick={onNew} disabled={thinking}>
+                {screenText(language, "new_order")}
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className={styles.expandToggle}
+          aria-expanded={controlsOpen}
+          onClick={() => setControlsOpen((open) => !open)}
+        >
+          {controlsOpen ? screenText(language, "collapse") : screenText(language, "expand")}
         </button>
       </div>
     </div>
   );
 }
 
+function PayMethodIcon({ kind }: { kind: "card" | "mobile" | "loyalty" }) {
+  if (kind === "card") {
+    return (
+      <svg className={styles.payMethodIcon} viewBox="0 0 24 24" aria-hidden>
+        <rect x="2" y="5" width="20" height="14" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M2 10h20" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <path d="M6 15h5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  if (kind === "mobile") {
+    return (
+      <svg className={styles.payMethodIcon} viewBox="0 0 24 24" aria-hidden>
+        <rect x="7" y="2.5" width="10" height="19" rx="2.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+        <circle cx="12" cy="17.5" r="1" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg className={styles.payMethodIcon} viewBox="0 0 24 24" aria-hidden>
+      <path
+        d="M12 3.2l2.2 4.5 5 .7-3.6 3.5.9 5-4.5-2.4-4.5 2.4.9-5L4.8 8.4l5-.7L12 3.2z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+
 function Reply({ say, heard, language }: { say: string | null; heard: string | null; language: AppLanguage }) {
   if (!say && !heard) return null;
   return (
-    <div className={styles.say} role="status">
-      {heard ? <p className={styles.heard}>{screenText(language, "you_said", { text: heard })}</p> : null}
-      {say ? <p className={styles.sayLine}>{say}</p> : null}
+    <div className={styles.say} role="status" aria-live="polite">
+      {heard ? (
+        <p className={styles.heard}>
+          <span className={styles.chatTag}>{screenText(language, "you_tag")}</span>
+          <span className={styles.chatText}>{heard}</span>
+        </p>
+      ) : null}
+      {say ? (
+        <p className={styles.sayLine}>
+          <span className={styles.chatTag}>{screenText(language, "machine_tag")}</span>
+          <span className={styles.chatText}>{say}</span>
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -1632,7 +2110,10 @@ function frequencyBars(analyser: AnalyserNode, freq: Uint8Array<ArrayBuffer>): n
 
 function VoiceLine({ sample, language }: { sample: VoiceSample | null; language: AppLanguage }) {
   const bars = sample?.bars ?? Array.from({ length: VOICE_BARS }, () => 0);
+  // Pack a readable meter into the circle without changing the sampler count.
+  const shown = bars.filter((_, index) => index % 2 === 0);
   const hearing = sample?.hearing ?? false;
+  const label = hearing ? screenText(language, "voice_captured") : screenText(language, "listening_caption");
   return (
     <div
       className={styles.voiceLine}
@@ -1642,13 +2123,18 @@ function VoiceLine({ sample, language }: { sample: VoiceSample | null; language:
       aria-valuemin={0}
       aria-valuemax={1}
       aria-valuenow={hearing ? 1 : 0}
+      title={label}
     >
       <span className={styles.voiceBars} aria-hidden="true">
-        {bars.map((bar, index) => (
-          <span key={index} className={styles.voiceBar} style={{ height: `${Math.round(12 + bar * 88)}%` }} />
+        {shown.map((bar, index) => (
+          <span
+            key={index}
+            className={styles.voiceBar}
+            style={{ height: `${Math.max(10, Math.round(bar * 100))}%` }}
+          />
         ))}
       </span>
-      <span className={styles.voiceCaption}>{hearing ? screenText(language, "voice_captured") : screenText(language, "listening_caption")}</span>
+      <span className={styles.srOnly}>{label}</span>
     </div>
   );
 }

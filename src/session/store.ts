@@ -55,6 +55,11 @@ function noticeFor(session: OrderSession, reason: RejectReason): string {
   return t(langOf(session), key);
 }
 
+export async function peekSession(id: string): Promise<OrderSession | null> {
+  const held = await recallSession(id);
+  return held?.session ?? null;
+}
+
 export async function sessionMachine(id: string): Promise<MachineId | null> {
   const held = await recallSession(id);
   return held?.session.machineId ?? null;

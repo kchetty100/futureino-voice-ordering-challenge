@@ -34,7 +34,7 @@ describe("customer phrases", () => {
     assert.doesNotMatch(crunchy.say, /doesn't carry/);
   });
 
-  it("opens the next screen only for Hey Future", () => {
+  it("recognizes Hey Future for legacy wake clips only", () => {
     assert.equal(isHeyFuture("Hey Future"), true);
     assert.equal(isHeyFuture("hey, future!"), true);
     assert.equal(isHeyFuture("Hay Future please"), true);
@@ -158,7 +158,7 @@ describe("navigation phrases", () => {
     assert.equal(requestedMachine("snacks"), "snacks");
   });
 
-  it("opens the cart overlay, scrolls, clears, and switches machines without breaking confirm", () => {
+  it("opens the cart overlay, scrolls, and clears without switching machines", () => {
     const drafted = answerWithRules(coffee(), "iced latte", 1);
     assert.equal(drafted.session.phase, "awaiting_confirmation");
 
@@ -174,12 +174,14 @@ describe("navigation phrases", () => {
     assert.equal(up.session.phase, "awaiting_confirmation");
 
     const snacks = answerWithRules(drafted.session, "return to snack screen", 4);
-    assert.equal(snacks.switchTo, "snacks");
+    assert.equal(snacks.switchTo, null);
+    assert.equal(snacks.say, "That item is not on this machine.");
     assert.equal(snacks.session.lines.length, 1);
     assert.equal(snacks.ui, null);
 
     const coffeeScreen = answerWithRules(drafted.session, "coffee machine", 5);
-    assert.equal(coffeeScreen.switchTo, "coffee");
+    assert.equal(coffeeScreen.switchTo, null);
+    assert.equal(coffeeScreen.say, "Please view the items below.");
 
     const wiped = answerWithRules(drafted.session, "remove everything from the cart", 6);
     assert.equal(wiped.session.lines.length, 0);
