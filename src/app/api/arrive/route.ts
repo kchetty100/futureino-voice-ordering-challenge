@@ -1,4 +1,4 @@
-import { wakeSay } from "../../../agent/arrive";
+import { wakeSay, welcomeKey } from "../../../agent/arrive";
 import { parseNavIntent } from "../../../agent/nav";
 import { isPromptEcho, speechPrompt } from "../../../catalog/index";
 import { detectLanguage, isAppLanguage, languageFromSttLabel, t, type AppLanguage } from "../../../i18n";
@@ -20,12 +20,13 @@ export async function POST(request: Request) {
   let wake = false;
   let pinnedLanguage: AppLanguage | null = null;
   if (contentType.includes("application/json")) {
-    const body = (await request.json()) as { text?: string; language?: string; intent?: string };
+    const body = (await request.json()) as { text?: string; language?: string; intent?: string; machine?: string };
     text = body.text?.trim() ?? "";
     pinnedLanguage = isAppLanguage(body.language) ? body.language : null;
     if (body.intent === "welcome") {
       const lang = pinnedLanguage ?? "en";
-      const say = t(lang, "welcome_choose");
+      const machine = body.machine === "coffee" || body.machine === "snacks" ? body.machine : null;
+      const say = t(lang, machine ? welcomeKey(machine) : "welcome_choose");
       return Response.json({
         session: null,
         readBack: null,

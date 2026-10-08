@@ -206,6 +206,7 @@ const ROWS = {
     he: "אמרו אשר ושלם",
     af: "Sê Bevestig en betaal",
   },
+  showing: { en: "Showing: {names}", es: "Mostrando: {names}", fr: "Affichage : {names}", he: "מוצג: {names}", af: "Wys: {names}" },
   unit: { en: "Unit {id}", es: "Unidad {id}", fr: "Unité {id}", he: "יחידה {id}", af: "Eenheid {id}" },
 } as const satisfies Record<string, Record<AppLanguage, string>>;
 

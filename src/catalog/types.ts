@@ -73,4 +73,9 @@ export type CatalogItem = {
   allergens: AllergenStatus;
   /** Boost Coffee: every drink needs hot, iced, or room before the order is complete. */
   requiresTemperature: boolean;
+  /**
+   * Drinks only: the temperatures we suggest it at, best first ("something hot", "something iced").
+   * Every drink can still be ordered hot, iced, or room. Empty when the contents are hidden.
+   */
+  suits?: readonly Temperature[];
 };

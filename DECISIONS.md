@@ -756,3 +756,67 @@ The welcome line already on screen moves with the button too, so it does not sta
 **Why:** Voice-first ordering should read as talk, not a wall of buttons. Expand keeps touch escape hatches (including when the mic is blocked) without changing order/engine wiring.
 
 **How we checked:** `npm run typecheck`. Menu/Review/Pay show Expand by default; Collapse hides CTAs; Pay tiles remain; Attract untouched.
+
+## 2026-10-05 — Vague taste asks suggest from this machine; true misses get a steer
+
+**Decided:** A sentence made only of taste, lightness, or recommendation words ("something sweet but not too heavy?", "not too heavy", "what do you recommend?", "surprise me", "algo dulce pero no muy pesado") is parsed in `src/agent/prefer.ts` before any machine or product search. It suggests up to three real items from the session machine only (`NEXT_PUBLIC_MACHINE_ID` on a bound unit), ranked by catalog taste tags: asked tags first, "not too X" drops X, "light / not too heavy / refreshing" drops `rich` items and leads with `light`, `fruity`, and `tart`. A bare recommendation shows a fixed spread of real ids per machine (not a popularity claim). The line stays `I can offer {names}.` with those ids spotlighted. Nothing is added. A preference that names the other machine ("something sweet from the snack machine", "to eat" on coffee) gets `wrong_machine`. A taste the machine has no tag for (crunchy on Boost Coffee) and a true miss ("burger", "can I get a pizza", "do you have pizza?") get `not_carried`, now "This machine doesn’t carry that. Pick from the menu, or say what you’d like." in EN, mirrored in ES/FR/HE/AF. Named products, cart edits, the mid-order machine lock, and the Attract picker are unchanged.
+
+**Alternatives:** Keep searching both catalogs for taste words. Offer generic picks when no tag matches. Let the model answer vague questions.
+
+**Why:** The brief calls out vague questions and missing items. Cross-catalog suggestions broke "a bound unit only offers its own menu", and "not too heavy" or "what do you recommend?" dead-ended on "doesn't carry that".
+
+**How we checked:** `npm test` (new `src/agent/prefer.test.ts`) and `npm run typecheck`.
+
+
+## 2026-10-05 — Bound-unit refuse for named cross-catalog products
+
+**Decided:** When `NEXT_PUBLIC_MACHINE_ID` is exactly `coffee` or `snacks` (bound / prod), named product search and add are limited to that unit’s catalog. Asking for a named item from the other catalog ("chips" / "potato chips" on coffee, "latte" on snacks) returns soft `not_carried` (or engine `wrong_machine` on a forced add); the cart does not gain that line. When the env is unset/empty (demo Attract picker), today’s cross-catalog named adds stay so both menus remain reachable by name on one laptop. Mid-order machine-name lock (`wrong_machine` for "what snacks do you have") is unchanged. Shared helper: `boundMachineId` / `isMachineBound` in `src/catalog/bound.ts`, used by Kiosk, `searchCatalog`, `add_to_cart`, fuzzy match, and the engine.
+
+**Alternatives:** Always refuse cross-catalog (breaks demo laptop). Client-only Attract bind (model/rules could still add). Keep searching both catalogs and only block at add time (offers would still spotlight other-machine ids).
+
+**Why:** A production unit is one machine = one catalog. Demo needs both catalogs by name without two physical units.
+
+**How we checked:** `npm test` (bound + unbound cases in `turn.test.ts` / `engine.test.ts`; harness `src/test/unbound.ts` clears `NEXT_PUBLIC_MACHINE_ID` so demo cross-add fixtures pass even when local `.env` binds coffee) and `npm run typecheck`.
+
+
+## 2026-10-08 — Full-bleed kiosk on desktop browsers
+
+**Decided:** At 840px wide and up, the kiosk fills the browser window edge to edge. The 430×920 phone bezel and its scale-to-fit transform are gone. Backgrounds run full width; Attract, Review and Pay content sits in a centred column (max 760px), the menu in a wider column (max 1180px) with an auto-fill grid (cards ≥168px), and the product sheet becomes a centred 560px dialog. Below 840px (phones) nothing changes.
+
+**Alternatives:** Keep the phone frame (reads as a mockup, not a kiosk). Stretch the phone layout to full width with no column (over-long lines and giant cards). Force browser Fullscreen API on first tap (surprising; F11 / a toggle can come later).
+
+**Why:** Demo should look like a real kiosk screen on a laptop or monitor.
+
+**How we checked:** CSS-only change in `src/kiosk/kiosk.module.css`; visual check at 1280×800, 1440×900, 1920×1080 and 390×844 pending.
+
+
+## 2026-10-08 — Desktop Menu split (reference layout)
+
+**Decided:** At 840px+ the Menu becomes a split: a header across the top (logo plus machine tabs in demo mode only; a bound unit shows just its machine name), the product grid on the left (auto-fill, cards ≥168px, about 6 across at 1440, only the grid scrolls), and a fixed right panel (27vw, 320–400px) with a large mic and its state label, the mic level while listening, the cart and Review, Back / Start over side by side, a language select, then the YOU/MACHINE lines. Controls are always open on desktop (no Expand). Tabs switch machine only while the cart is empty; switching starts a fresh session on the other machine. Phones (<840px) are unchanged. `useWide()` in `Kiosk.tsx` mirrors the CSS breakpoint.
+
+**Alternatives:** The reference's four cabinet tabs (we have two machines; real units are config-locked). Tabs that switch mid-order (breaks the machine lock). A hands-free / hold-to-talk toggle (not built yet; hold-to-talk is still an open gap).
+
+**Why:** User asked to match the reference screenshot on desktop.
+
+**How we checked:** `npm run typecheck`, `npm test` (85/85). Visual pass at 1280×800, 1440×900, 1920×1080 and 390×844 pending (site is password-locked).
+
+## 2026-10-08 — Conversation pass: temperatures, closest item, AI suggest, Added line
+
+- Temperature words (hot, warm, cozy, iced, cold, plus es/fr/he/af) are preferences. Each drink lists the temperatures it `suits` (catalog data, best first); offers come from that list, ranked by taste fit. Every drink can still be ordered hot, iced or room.
+- "I'm freezing" / "cold outside" means hot; "hot outside" means iced. On Snacks Bot, "hot" means spicy and cold has nothing.
+- A drink named right after a hot/iced offer keeps that temperature (`tempHint`, cleared on the next add).
+- "Without milk" (any untagged ingredient) answers "no allergen information" instead of offering around it.
+- A named item we lack: "We don't have that. The closest here is…" from this machine only, priced.
+- Vague lines the rules can't place go to the model's `suggest` action: up to 3 ids from the session's machine, priced from the catalog, never added.
+- Machine greetings say what the machine makes (and temperatures for coffee). After an add: "Added: Mocha · hot, $4.40. Total … tap Review order to pay." Voice confirm still works.
+- "warm" removed from Afrikaans detection (it misfired on English).
+
+## 2026-10-08 — Offer chrome: numbered badges and "Showing:" chip
+
+**Decided:** When an offer lights cards on the Menu (phone and desktop split), each lit card gets a small cyan numbered badge (1, 2, 3) at its top start corner, keeping the existing cyan ring. The number is the card's index in `spotlightIds` + 1 (the engine sends them in rank order), filtered to this machine's grid. While an offer is lit, the other cards dim to 0.45 opacity; they stay tappable and restore when the spotlight clears. The MACHINE bubble gets a chip above the machine line, `Showing: A · B · C` (chrome key `showing`, five languages; product names stay English). Badges, dimming and chip all follow the spotlight, so "no thanks" (which keeps the offer lit) keeps them too. Reduced motion drops the badge pop, card lift and dim transition. UI only; no engine or wire change.
+
+**Alternatives:** Badge on the visual left in RTL too (we use the logical start corner, so Hebrew reads 1 from the right). Hiding non-lit cards (loses touch browsing). Putting the chip inside the spoken line (TTS would read it).
+
+**Why:** Matches the reference demo: the customer can see which cards the machine is talking about, and in what order.
+
+**How we checked:** `npm run typecheck`, `npm test` (97/97). Visual pass pending (site is password-locked).

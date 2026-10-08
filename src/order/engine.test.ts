@@ -107,6 +107,22 @@ describe("order engine", () => {
     assert.equal(missing.session.lines.length, 0);
   });
 
+  it("refuses a cross-catalog add when the unit is bound", () => {
+    const previous = process.env.NEXT_PUBLIC_MACHINE_ID;
+    process.env.NEXT_PUBLIC_MACHINE_ID = "coffee";
+    try {
+      const drink = apply(coffee(), { type: "add", productId: LATTE, temperature: "iced", now: 1 });
+      const blocked = apply(drink.session, { type: "add", productId: CHIPS, now: 2 });
+      assert.equal(blocked.ok, false);
+      assert.equal(blocked.reason, "wrong_machine");
+      assert.equal(blocked.session.lines.length, 1);
+      assert.equal(blocked.session.lines[0]?.productId, LATTE);
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_MACHINE_ID;
+      else process.env.NEXT_PUBLIC_MACHINE_ID = previous;
+    }
+  });
+
   it("completes a snack without a temperature and rejects a temperature on it", () => {
     const added = apply(snacks(), { type: "add", productId: CHIPS, quantity: 2, now: 1 });
     assert.equal(added.ok, true);

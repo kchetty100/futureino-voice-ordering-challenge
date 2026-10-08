@@ -54,7 +54,7 @@ export function detectLanguage(text: string): AppLanguage | null {
   }
 
   // Strong Afrikaans signals
-  if (/\b(hallo|asseblief|ek\s+wil|mandjie|warm|ysa|bevestig|dankie|ja\s+asseblief)\b/i.test(lower)) {
+  if (/\b(hallo|asseblief|ek\s+wil|mandjie|ysa|bevestig|dankie|ja\s+asseblief)\b/i.test(lower)) {
     return "af";
   }
 

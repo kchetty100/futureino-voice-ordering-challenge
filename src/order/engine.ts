@@ -1,4 +1,4 @@
-import { getItem, TEMPERATURES, type MachineId, type Temperature } from "../catalog/index";
+import { getItem, isMachineBound, TEMPERATURES, type MachineId, type Temperature } from "../catalog/index";
 import type { AppLanguage } from "../i18n";
 
 /**
@@ -6,8 +6,8 @@ import type { AppLanguage } from "../i18n";
  * A model may propose a product; it cannot mark an order ready to pay.
  *
  * Time is passed in. Silence does not count as activity. A tick does not
- * prompt or clear the cart. The kiosk ends a visit when the camera has
- * seen nobody, after a countdown.
+ * prompt or clear the cart. The kiosk ends a visit after idle quiet time
+ * and an on-screen countdown (mic-only; no camera).
  */
 
 export const MAX_QUANTITY = 9;
@@ -45,6 +45,11 @@ export type OrderSession = {
   preferredLanguage: AppLanguage;
   /** Once true, only an explicit language choice may change preferredLanguage. */
   languageSet: boolean;
+  /**
+   * "Something hot" / "something iced": the temperature the customer asked for while browsing.
+   * The next drink they name without a temperature gets it. Cleared on the next add.
+   */
+  tempHint?: Temperature | null;
 };
 
 export type MissingField = {
@@ -187,6 +192,10 @@ function applyAdd(
   const item = getItem(command.productId);
   if (!item) {
     return fail(touch(session, command.now), "unknown_product");
+  }
+  // Bound unit: one machine = one catalog. Demo (env unset) still allows cross-catalog lines.
+  if (isMachineBound() && item.machineId !== session.machineId) {
+    return fail(touch(session, command.now), "wrong_machine");
   }
 
   const quantity = command.quantity ?? 1;

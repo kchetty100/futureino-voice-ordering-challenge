@@ -1,10 +1,11 @@
-import { aliasesFor, CATALOG, getItem, type CatalogItem, type MachineId, type Temperature } from "../catalog/index";
+import { aliasesFor, boundMachineId, CATALOG, getItem, itemsForMachine, type CatalogItem, type MachineId, type Temperature } from "../catalog/index";
 import { applyLanguageCue, langOf, t, temperatureFromCue } from "../i18n";
 import { apply, MAX_QUANTITY, type OrderSession, type CartLine, type ReadBack } from "../order/engine";
 import { machineIntro, requestedMachine } from "./arrive";
 import { parseNavIntent, type UiCommand } from "./nav";
+import { parsePreference, preferredItems, rulesOutIngredient, type Preference } from "./prefer";
 import { foldCloseTemperatures } from "../speech/near";
-import { asksAllergens, isClearNo, isClearYes, itemScore, money, namesAProduct, productMentioned, runTool, searchCatalog, wantsChange, wantsCorrection, wantsNoMore, type ToolEffect } from "./tools";
+import { asksAllergens, isClearNo, isClearYes, itemScore, money, namesAProduct, pricedList, productMentioned, runTool, searchCatalog, wantsChange, wantsCorrection, wantsNoMore, type ToolEffect } from "./tools";
 
 export type { UiCommand };
 
@@ -89,15 +90,37 @@ export function mentionsOrder(text: string): boolean {
   if (spokenTemperature(trimmed)) return true;
   if (requestedMachine(trimmed)) return true;
   if (parseLanguageOnly(trimmed)) return true;
-  if (/\b(sweet|salty|chocolate|crunchy|chewy|crispy|nutty|fruity|creamy|spiced|mild|rich|light|heavy|snack|snacks|coffee|menu|recommend)\b/i.test(trimmed)) return true;
+  if (/\b(sweet|salty|chocolate|crunchy|chewy|crispy|nutty|fruity|creamy|spiced|mild|rich|light|heavy|snack|snacks|coffee|menu|recommend|drink|drinks|thirsty|hungry|tired|sleepy|energy|craving|suggest|warm|cozy|cosy|cold|iced|freezing|chilly|boiling|sweating|starving|exhausted)\b/i.test(trimmed)) return true;
+  if (parsePreference(trimmed)) return true;
   if (/^(that'?s all|that is all|done|checkout|check out)$/i.test(trimmed)) return true;
   if (namesAProduct(trimmed)) return true;
   return looksLikeItemAttempt(trimmed);
 }
 
+/** "I want a burger", "can I get a pizza", "do you have pizza?": an order frame around one word. */
+const ORDER_LEAD =
+  /^(?:(?:hi|hey|um|uh|so|okay|ok|yeah|and)\s+)*(?:i'?d like|i would like|i want|i wanna|i'?ll have|i'?ll take|i need|let me (?:get|have|try)|get me|i'?ll get|i'?ll go with|i'?ll try|can i (?:get|have)|could i (?:get|have)|may i (?:get|have)|give me|do you (?:have|sell|carry|do)|have you got|you got|got any)\s+/;
+
+const ITEM_ARTICLE = new Set(["a", "an", "some", "any", "the", "one", "please", "just"]);
+
+/** One word after an order frame that is not a product request ("give me a minute"). */
+const NOT_AN_ITEM = new Set([
+  "it", "that", "this", "them", "those", "these", "something", "anything", "everything", "nothing", "more", "else", "help",
+  "minute", "moment", "second", "sec", "break", "hand", "chance", "time", "home", "change", "receipt", "refund", "idea",
+]);
+
+function orderFramedItem(normalized: string): boolean | null {
+  const spoken = normalized.replace(/[’]/g, "'").replace(/[?.!,]/g, " ").replace(/\s+/g, " ").trim();
+  const rest = spoken.replace(ORDER_LEAD, "");
+  if (rest === spoken) return null;
+  const words = rest.split(" ").filter((word) => word.length > 0 && !ITEM_ARTICLE.has(word));
+  return words.length === 1 && /^[a-z]{3,}$/.test(words[0] ?? "") && !NOT_AN_ITEM.has(words[0] ?? "");
+}
+
 /** A short phrase such as "a burger", which should be answered as a missing item. */
 function looksLikeItemAttempt(text: string): boolean {
   const normalized = text.trim().toLowerCase();
+  if (orderFramedItem(normalized)) return true;
   if (/^(what|when|where|why|who|how|did|does|do|is|are|was|were|can|could)\b/.test(normalized)) return false;
   const filler = new Set(["a", "an", "the", "some", "please", "just", "um", "uh", "and", "oh", "so", "yeah", "yep", "ok"]);
   const tokens = normalized.split(/[^a-z0-9]+/).filter((token) => token.length > 2 && !filler.has(token));
@@ -169,6 +192,19 @@ function directReply(session: OrderSession, text: string, now: number): TurnResu
   if (nav) return nav;
 
   const destination = requestedMachine(text);
+  // "Something sweet but not too heavy?" suggests from this machine. It never adds.
+  // A preference that names the other machine still gets wrong_machine below.
+  const parsed = parsePreference(text);
+  // "Hot" right after "hot, iced, or room?" answers that question; it is not a new ask.
+  const answersTemperature =
+    parsed?.temperature && parsed.want.length === 0 && parsed.avoid.length === 0 && !parsed.light && session.lines.some(needsTemperature);
+  const preference = answersTemperature ? null : parsed;
+  if (preference) {
+    const named = destination ?? spokenMachine(text);
+    if (!named || named === session.machineId) return offerPreference(session, preference, now);
+    const stayed = apply(session, { type: "activity", now });
+    return done(stayed.session, t(langOf(stayed.session), "wrong_machine"), [], null);
+  }
   if (destination) {
     const stayed = apply(session, { type: "activity", now });
     if (destination === session.machineId) {
@@ -206,6 +242,21 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
     return fromEffect(runTool(session, "read_back", {}, now));
   }
 
+  // "No thanks" after an offer: a polite close, not "we don't carry that". The cart is unchanged.
+  if (isClearNo(normalized) && session.phase !== "awaiting_confirmation" && session.phase !== "ready_to_pay") {
+    const stayed = apply(session, { type: "activity", now });
+    return done(stayed.session, t(langOf(session), "no_problem"), [], null);
+  }
+
+  // "A latte without milk": light the latte, but say we have no ingredient data and nothing is added.
+  if (rulesOutIngredient(normalized)) {
+    const stayed = apply(session, { type: "activity", now });
+    const named = searchCatalog(normalized.replace(/\b(without|no|sin|sans|sonder|free)\b.*$/, ""), session.machineId)
+      .filter((item) => item.machineId === session.machineId)
+      .slice(0, 1);
+    return done(stayed.session, t(langOf(session), "allergens_unknown"), named.map((item) => item.id), null);
+  }
+
   const joined = addJoined(session, normalized, now);
   if (joined) return joined;
 
@@ -213,11 +264,8 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
   const counted = stripCount(normalized);
   const temperature = findTemperature(counted);
   const query = catalogQuery(stripTemperature(counted), quantity > 1);
-  if (/\b(light|not too heavy)\b/.test(normalized)) {
-    return offerVague(session, query || "sweet", now, { light: true });
-  }
 
-  const hits = searchCatalog(query || normalized);
+  const hits = searchCatalog(query || normalized, session.machineId);
   if (hits.length === 0) {
     const stayed = apply(session, { type: "activity", now });
     const say =
@@ -235,13 +283,24 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
   const precise = best && bestScore >= 5 && bestScore - secondScore >= 3;
   if (precise && best && !productMentioned(normalized, best.id)) return roomTalk(session, now);
   if (!precise || !best) {
+    // Offer only what this machine makes, priced. A named item we lack gets "we don't have that, closest is…".
     const stayed = apply(session, { type: "activity", now });
-    const close = ranked.filter((item) => itemScore(item, query || normalized) >= bestScore - 2).slice(0, 3);
-    const names = close.map((item) => item.name).join(", ");
-    return done(stayed.session, t(langOf(session), "can_offer", { names }), close.map((item) => item.id), null);
+    const lang = langOf(session);
+    const local = ranked.filter((item) => item.machineId === session.machineId);
+    const localBest = local[0] ? itemScore(local[0], query || normalized) : 0;
+    const close = local.filter((item) => itemScore(item, query || normalized) >= localBest - 2).slice(0, 3);
+    if (close.length === 0) return done(stayed.session, t(lang, "not_carried"), [], null);
+    const list = pricedList(close, lang);
+    const say = orderFramedItem(normalized) !== null ? t(lang, "closest", { list }) : t(lang, "can_offer", { names: list });
+    return done(stayed.session, say, close.map((item) => item.id), null);
   }
 
-  if (quantity === 1 && sameDrinkAlreadyWaiting(session, best.id, temperature)) {
+  // "Something hot" earlier, then "a mocha": the mocha comes hot without asking again.
+  const hinted = !temperature && best.requiresTemperature ? (session.tempHint ?? null) : null;
+  const servedAt = temperature ?? hinted;
+  if (session.tempHint) session = { ...session, tempHint: null };
+
+  if (quantity === 1 && sameDrinkAlreadyWaiting(session, best.id, servedAt)) {
     const stayed = apply(session, { type: "activity", now });
     return done(stayed.session, t(langOf(stayed.session), "needs_temp", { name: best.name }), [], null);
   }
@@ -252,11 +311,22 @@ function interpret(session: OrderSession, text: string, now: number): TurnResult
     {
       productId: best.id,
       ...(quantity > 1 ? { quantity } : {}),
-      ...(temperature && best.requiresTemperature ? { temperature } : {}),
+      ...(servedAt && best.requiresTemperature ? { temperature: servedAt } : {}),
     },
     now,
   );
-  return finishIfComplete(added, now);
+  const finished = finishIfComplete(added, now);
+  if (!added.ok || !finished.readBack) return finished;
+  // Say what just went in, then point to Review/Pay. Voice "confirm" still works from here.
+  const item = `${quantity > 1 ? `${quantity} × ` : ""}${best.name}${servedAt && best.requiresTemperature ? ` · ${servedAt}` : ""}`;
+  return {
+    ...finished,
+    say: t(langOf(finished.session), "added_pay", {
+      item,
+      price: money(best.priceCents * quantity),
+      total: money(finished.readBack.totalCents),
+    }),
+  };
 }
 
 /** "latte and chips" is two items. "americano, mocha and cappuccino" is three. "cookies and cream" stays one product. */
@@ -403,7 +473,9 @@ function fuzzyItem(query: string): CatalogItem | null {
     .filter((token) => token.length >= 4 && !LIST_FILLER.has(token));
   if (tokens.length === 0) return null;
   const ranks: Array<{ item: CatalogItem; rank: number }> = [];
-  for (const item of CATALOG) {
+  const bound = boundMachineId();
+  const pool = bound ? itemsForMachine(bound) : CATALOG;
+  for (const item of pool) {
     const rank = fuzzyRank(tokens, item);
     if (rank == null) continue;
     ranks.push({ item, rank });
@@ -516,26 +588,33 @@ function stripCount(text: string): string {
     .trim();
 }
 
-function offerVague(
-  session: OrderSession,
-  query: string,
-  now: number,
-  prefs: { light?: boolean },
-): TurnResult {
-  let hits = searchCatalog(query);
-  if (prefs.light) {
-    const lighter = hits.filter((item) => item.tasteTags.includes("light") && !item.tasteTags.includes("rich"));
-    hits = lighter.length > 0 ? lighter : hits.filter((item) => !item.tasteTags.includes("rich"));
-  }
+/** "Something sweet from the snack machine": which machine a preference sentence points at, if only one. */
+function spokenMachine(text: string): MachineId | null {
+  const normalized = text.toLowerCase();
+  const snacks = /\b(snacks?|eat)\b/.test(normalized);
+  const coffee = /\b(coffees?|drinks?)\b/.test(normalized);
+  if (snacks && !coffee) return "snacks";
+  if (coffee && !snacks) return "coffee";
+  return null;
+}
+
+/** Up to three real items on this machine that fit the taste words. Nothing is added. */
+function offerPreference(session: OrderSession, preference: Preference, now: number): TurnResult {
   const stayed = apply(session, { type: "activity", now });
-  if (hits.length === 0) {
-    return done(stayed.session, t(langOf(session), "not_carried"), [], null);
+  let items = preferredItems(session.machineId, preference);
+  // "Hot and fruity": no fruity drink is best hot, but any drink can be ordered hot.
+  if (items.length === 0 && preference.temperature && preference.want.length > 0) {
+    items = preferredItems(session.machineId, { ...preference, temperature: null });
   }
-  const names = hits
-    .slice(0, 3)
-    .map((item) => item.name)
-    .join(", ");
-  return done(stayed.session, t(langOf(session), "can_offer", { names }), hits.slice(0, 3).map((item) => item.id), null);
+  const lang = langOf(stayed.session);
+  // "Hot, without milk": we have no ingredient data, so we do not quietly offer a latte.
+  if (preference.ingredient) return done(stayed.session, t(lang, "allergens_unknown"), [], null);
+  if (items.length === 0) return done(stayed.session, t(lang, "not_carried"), [], null);
+  const list = pricedList(items, lang);
+  const drinks = items.every((item) => item.requiresTemperature);
+  const key = drinks && preference.temperature === "hot" ? "offer_hot" : drinks && preference.temperature === "iced" ? "offer_iced" : "offer_list";
+  const next = drinks && preference.temperature ? { ...stayed.session, tempHint: preference.temperature } : stayed.session;
+  return done(next, t(lang, key, { list }), items.map((item) => item.id), null);
 }
 
 export function finishIfComplete(effect: ToolEffect, now: number): TurnResult {

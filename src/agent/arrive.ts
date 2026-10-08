@@ -53,11 +53,16 @@ export function machineForUtterance(text: string): MachineId | null {
   return null;
 }
 
-export function machineIntro(_machineId: MachineId, language?: AppLanguage | null): { say: string; spotlightIds: string[] } {
-  return { say: t(language ?? "en", "view_items"), spotlightIds: [] };
+export function machineIntro(machineId: MachineId, language?: AppLanguage | null): { say: string; spotlightIds: string[] } {
+  return { say: t(language ?? "en", welcomeKey(machineId)), spotlightIds: [] };
 }
 
 function topScore(machineId: MachineId, text: string): number {
   const best = searchMenu(machineId, text)[0];
   return best ? itemScore(best, text) : 0;
+}
+
+/** The machine's own greeting: what it makes and, for drinks, the temperatures it serves. */
+export function welcomeKey(machineId: MachineId): "welcome_coffee" | "welcome_snacks" {
+  return machineId === "coffee" ? "welcome_coffee" : "welcome_snacks";
 }

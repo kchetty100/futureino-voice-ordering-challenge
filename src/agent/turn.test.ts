@@ -6,6 +6,11 @@ import { applyHeard } from "./understand";
 import { chooseTurn, confirmationDecision, heardForSpeech } from "./turn";
 import { changesOrder, isClearYes, runTool } from "./tools";
 import { createSession } from "../order/engine";
+import { getItem } from "../catalog/index";
+
+function suit(ids: readonly string[], temperature: "hot" | "iced"): boolean {
+  return ids.length > 0 && ids.every((id) => getItem(id)?.suits?.includes(temperature));
+}
 
 function coffee() {
   return createSession({ id: "c", machineId: "coffee", now: 0 });
@@ -23,8 +28,8 @@ describe("text agent", () => {
       assert.equal(turn.session.lines[0]?.productId, "coffee-01", phrase);
       assert.equal(turn.session.lines[0]?.temperature, "hot", phrase);
       assert.equal(turn.session.phase, "awaiting_confirmation", phrase);
-      assert.match(turn.say, /hot Americano/);
-      assert.doesNotMatch(turn.say, /doesn't carry/);
+      assert.match(turn.say, /Americano · hot/);
+      assert.doesNotMatch(turn.say, /doesn['’]t carry/);
     }
   });
 
@@ -44,10 +49,10 @@ describe("text agent", () => {
     assert.equal(drafted.session.lines[0]?.productId, "coffee-04");
     assert.equal(drafted.session.lines[0]?.temperature, "iced");
     assert.equal(drafted.session.phase, "awaiting_confirmation");
-    assert.match(drafted.say, /iced Latte/);
+    assert.match(drafted.say, /Latte · iced/);
     assert.match(drafted.say, /\$3\.60/);
     assert.match(drafted.say, /Anything else/i);
-    assert.match(drafted.say, /say confirm/i);
+    assert.match(drafted.say, /tap Confirm order/);
 
     const more = answerWithRules(drafted.session, "something else", 2);
     assert.equal(more.session.phase, "drafting");
@@ -69,7 +74,7 @@ describe("text agent", () => {
       const paid = answerWithRules(drafted.session, phrase, 2);
       assert.equal(paid.session.phase, "ready_to_pay", phrase);
       assert.equal(paid.session.confirmedBy, "voice_yes", phrase);
-      assert.doesNotMatch(paid.say, /doesn't carry/);
+      assert.doesNotMatch(paid.say, /doesn['’]t carry/);
     }
   });
 
@@ -97,12 +102,12 @@ describe("text agent", () => {
       const paid = answerWithRules(drafted.session, phrase, 2);
       assert.equal(paid.session.phase, "ready_to_pay", phrase);
       assert.equal(paid.session.lines[0]?.temperature, "iced", phrase);
-      assert.doesNotMatch(paid.say, /doesn't carry/);
+      assert.doesNotMatch(paid.say, /doesn['’]t carry/);
     }
     const changed = answerWithRules(drafted.session, "no, make it hot", 3);
     assert.notEqual(changed.session.phase, "ready_to_pay");
     const missing = answerWithRules(drafted.session, "a burger", 4);
-    assert.equal(missing.say, "This machine doesn't carry that.");
+    assert.equal(missing.say, "This machine doesn’t carry that. Pick from the menu, or say what you’d like.");
     const vague = answerWithRules(drafted.session, "um", 5);
     assert.equal(vague.say, "Anything else, or say confirm?");
   });
@@ -118,7 +123,7 @@ describe("text agent", () => {
   it("refuses an item the machine does not carry", () => {
     const turn = answerWithRules(coffee(), "a burger", 1);
     assert.equal(turn.session.lines.length, 0);
-    assert.equal(turn.say, "This machine doesn't carry that.");
+    assert.equal(turn.say, "This machine doesn’t carry that. Pick from the menu, or say what you’d like.");
     assert.equal(turn.say.includes("burger"), false);
   });
 
@@ -141,7 +146,7 @@ describe("text agent", () => {
     assert.equal(requestedMachine("What's next do you have?"), "snacks");
     const coffeeAsk = answerWithRules(coffee(), "I want a coffee", 4);
     assert.equal(coffeeAsk.session.lines.length, 0);
-    assert.equal(coffeeAsk.say, "Please view the items below.");
+    assert.equal(coffeeAsk.say, "Hi! I’m Boost. Coffee, tea, matcha or juice, hot, iced or room temp. What can I make you?");
     assert.equal(coffeeAsk.switchTo, null);
     assert.deepEqual(coffeeAsk.spotlightIds, []);
     assert.equal(machineForUtterance("iced latte"), "coffee");
@@ -302,7 +307,7 @@ describe("text agent", () => {
     assert.equal(turn.session.lines[0]?.productId, "coffee-04");
     assert.equal(turn.session.lines[1]?.productId, "snacks-19");
     assert.equal(turn.session.phase, "awaiting_confirmation");
-    assert.match(turn.say, /Latte/);
+    assert.match(turn.say, /Total \$5\.60/);
     assert.match(turn.say, /Potato Chips/);
   });
 
@@ -556,5 +561,189 @@ describe("text agent", () => {
       menu: null,
     });
     assert.equal(kept?.lines[0]?.productId, "coffee-06");
+  });
+
+  it("refuses named other-catalog products when the unit is bound", () => {
+    const previous = process.env.NEXT_PUBLIC_MACHINE_ID;
+    process.env.NEXT_PUBLIC_MACHINE_ID = "coffee";
+    try {
+      for (const phrase of ["chips", "potato chips", "I want potato chips"]) {
+        const turn = answerWithRules(coffee(), phrase, 1);
+        assert.equal(turn.session.lines.length, 0, phrase);
+        assert.equal(
+          turn.say,
+          "This machine doesn’t carry that. Pick from the menu, or say what you’d like.",
+          phrase,
+        );
+      }
+      const joined = answerWithRules(coffee(), "iced latte and potato chips", 2);
+      assert.ok(joined.session.lines.every((line) => line.productId.startsWith("coffee-")), joined.say);
+      assert.equal(
+        joined.session.lines.some((line) => line.productId === "snacks-19"),
+        false,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_MACHINE_ID;
+      else process.env.NEXT_PUBLIC_MACHINE_ID = previous;
+    }
+
+    process.env.NEXT_PUBLIC_MACHINE_ID = "snacks";
+    try {
+      for (const phrase of ["latte", "iced latte", "I want a mocha"]) {
+        const turn = answerWithRules(snacks(), phrase, 3);
+        assert.equal(turn.session.lines.length, 0, phrase);
+        assert.equal(
+          turn.say,
+          "This machine doesn’t carry that. Pick from the menu, or say what you’d like.",
+          phrase,
+        );
+      }
+      const same = answerWithRules(snacks(), "potato chips", 4);
+      assert.equal(same.session.lines.length, 1);
+      assert.equal(same.session.lines[0]?.productId, "snacks-19");
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_MACHINE_ID;
+      else process.env.NEXT_PUBLIC_MACHINE_ID = previous;
+    }
+  });
+
+  it("still adds across catalogs when the unit is unbound", () => {
+    const previous = process.env.NEXT_PUBLIC_MACHINE_ID;
+    delete process.env.NEXT_PUBLIC_MACHINE_ID;
+    try {
+      const both = answerWithRules(coffee(), "iced latte and potato chips", 1);
+      assert.equal(both.session.lines.length, 2);
+      assert.equal(both.session.lines[0]?.productId, "coffee-04");
+      assert.equal(both.session.lines[1]?.productId, "snacks-19");
+      const chips = answerWithRules(coffee(), "potato chips", 2);
+      assert.equal(chips.session.lines.length, 1);
+      assert.equal(chips.session.lines[0]?.productId, "snacks-19");
+    } finally {
+      if (previous === undefined) delete process.env.NEXT_PUBLIC_MACHINE_ID;
+      else process.env.NEXT_PUBLIC_MACHINE_ID = previous;
+    }
+  });
+});
+
+describe("Boost conversation script", () => {
+  it("offers three priced hot drinks, then adds the pick hot and points to Review", () => {
+    const asked = answerWithRules(coffee(), "What's nice that's hot to drink?", 1);
+    assert.equal(asked.spotlightIds.length, 3);
+    assert.ok(suit(asked.spotlightIds, "hot"));
+    assert.equal(asked.session.lines.length, 0);
+    assert.match(asked.say, /Mocha for \$\d\.\d\d/);
+    assert.match(asked.say, /Each one comes hot/);
+
+    const picked = answerWithRules(asked.session, "Let me get a mocha.", 2);
+    assert.equal(picked.session.lines[0]?.productId, "coffee-06");
+    assert.equal(picked.session.lines[0]?.temperature, "hot");
+    assert.match(picked.say, /^Added: Mocha · hot, \$\d\.\d\d\./);
+    assert.match(picked.say, /tap Confirm order/);
+    assert.equal(picked.session.tempHint ?? null, null);
+  });
+
+  it("reads warm, cozy, iced and cold as temperatures and keeps English", () => {
+    for (const phrase of ["something warm", "something cozy", "I'd like something hot"]) {
+      const turn = answerWithRules(coffee(), phrase, 1);
+      assert.ok(suit(turn.spotlightIds, "hot"), phrase);
+      assert.equal(turn.session.preferredLanguage ?? "en", "en", phrase);
+    }
+    for (const phrase of ["something iced", "something cold"]) {
+      const turn = answerWithRules(coffee(), phrase, 1);
+      assert.ok(suit(turn.spotlightIds, "iced"), phrase);
+      assert.match(turn.say, /Each one comes iced/, phrase);
+    }
+  });
+
+  it("answers a drink we lack with the closest item from this machine", () => {
+    const turn = answerWithRules(coffee(), "Let me get a hot chocolate.", 1);
+    assert.equal(turn.session.lines.length, 0);
+    assert.match(turn.say, /^We don’t have that\. The closest here is /);
+    assert.ok(turn.spotlightIds.length > 0);
+    assert.ok(turn.spotlightIds.every((id) => id.startsWith("coffee-")));
+  });
+
+  it("treats hot as spicy on the snack machine and has nothing cold", () => {
+    const hot = answerWithRules(snacks(), "something hot", 1);
+    assert.ok(hot.spotlightIds.length > 0);
+    assert.ok(hot.spotlightIds.every((id) => id.startsWith("snacks-")));
+    const cold = answerWithRules(snacks(), "something cold", 1);
+    assert.deepEqual(cold.spotlightIds, []);
+    assert.equal(cold.session.lines.length, 0);
+  });
+
+  it("greets with what the machine makes", () => {
+    const coffeeAsk = answerWithRules(coffee(), "what drinks do you have", 1);
+    assert.match(coffeeAsk.say, /Coffee, tea, matcha or juice, hot, iced or room temp/);
+  });
+
+  it("lets the AI suggest only this machine's items, priced, without adding", () => {
+    const turn = applyHeard(coffee(), { action: "suggest", lines: [], choices: ["snacks-19", "coffee-04"], menu: null }, 1);
+    assert.ok(turn);
+    assert.deepEqual(turn.spotlightIds, ["coffee-04"]);
+    assert.equal(turn.session.lines.length, 0);
+    assert.match(turn.say, /^You could go for Latte for \$/);
+  });
+
+  it("picks temperature offers from what each drink suits, with tastes", () => {
+    for (const phrase of ["whats nice and hot", "anything hot?", "hot and sweet", "hot but not too strong", "warm and chocolatey", "I'm freezing", "what's good when it's cold outside"]) {
+      const turn = answerWithRules(coffee(), phrase, 1);
+      assert.ok(suit(turn.spotlightIds, "hot"), phrase);
+      assert.equal(turn.session.lines.length, 0, phrase);
+    }
+    for (const phrase of ["iced and sweet", "it's so hot outside"]) {
+      assert.ok(suit(answerWithRules(coffee(), phrase, 1).spotlightIds, "iced"), phrase);
+    }
+    const notStrong = answerWithRules(coffee(), "hot but not too strong", 1);
+    assert.ok(notStrong.spotlightIds.every((id) => !getItem(id)?.tasteTags.includes("strong")));
+  });
+
+  it("says we have no ingredient details instead of offering around an untagged ingredient", () => {
+    for (const phrase of ["something hot without milk", "no milk please"]) {
+      const turn = answerWithRules(coffee(), phrase, 1);
+      assert.deepEqual(turn.spotlightIds, [], phrase);
+      assert.match(turn.say, /allergen information/, phrase);
+    }
+  });
+});
+
+describe("Boost script follow-ups", () => {
+  it("closes politely on no thanks and leaves the cart alone", () => {
+    const offered = answerWithRules(coffee(), "something hot", 1);
+    const declined = answerWithRules(offered.session, "no thanks", 2);
+    assert.equal(declined.say, "No problem. Anything else?");
+    assert.equal(declined.session.lines.length, 0);
+  });
+
+  it("lights the named drink but promises nothing for a latte without milk", () => {
+    const turn = answerWithRules(coffee(), "a latte without milk", 1);
+    assert.deepEqual(turn.spotlightIds, ["coffee-04"]);
+    assert.equal(turn.session.lines.length, 0);
+    assert.match(turn.say, /allergen information/);
+  });
+
+  it("uses taste words with a temperature, and relaxes the temperature when nothing suits", () => {
+    const strong = answerWithRules(coffee(), "hot and strong", 1);
+    assert.ok(strong.spotlightIds.every((id) => getItem(id)?.tasteTags.includes("strong")));
+    const fruity = answerWithRules(coffee(), "something hot and fruity", 1);
+    assert.ok(fruity.spotlightIds.length > 0);
+    assert.ok(fruity.spotlightIds.every((id) => getItem(id)?.tasteTags.includes("fruity")));
+    assert.match(fruity.say, /Each one comes hot/);
+  });
+});
+
+describe("Review read-back wording", () => {
+  it("never sends the customer to Review order from Review, in every language", async () => {
+    const { APP_LANGUAGES, ui: screenText } = await import("../i18n");
+    for (const language of APP_LANGUAGES) {
+      const session = { ...coffee(), preferredLanguage: language, languageSet: true };
+      const added = answerWithRules(session, "iced latte", 1);
+      assert.ok(added.readBack, language);
+      assert.ok(!added.say.includes(screenText(language, "review_order")), `${language}: ${added.say}`);
+      assert.ok(added.say.includes(screenText(language, "confirm")), `${language}: ${added.say}`);
+      const read = runTool(added.session, "read_back", {}, 2);
+      assert.ok(!read.say.includes(screenText(language, "review_order")), `${language}: ${read.say}`);
+      assert.ok(read.say.includes(screenText(language, "confirm")), `${language}: ${read.say}`);
+    }
   });
 });

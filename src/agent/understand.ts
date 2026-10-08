@@ -5,9 +5,9 @@ import { apply, type OrderSession } from "../order/engine";
 import { langOf, t } from "../i18n";
 import { machineIntro } from "./arrive";
 import { finishIfComplete, type TurnResult } from "./rules";
-import { runTool, type ToolEffect } from "./tools";
+import { pricedList, runTool, type ToolEffect } from "./tools";
 
-export type HeardAction = "add" | "clarify" | "menu" | "none" | "clear" | "remove" | "set_quantity" | "set_temperature";
+export type HeardAction = "add" | "clarify" | "suggest" | "menu" | "none" | "clear" | "remove" | "set_quantity" | "set_temperature";
 
 export type HeardLine = {
   productId: string;
@@ -25,7 +25,7 @@ export type Heard = {
 const MENU = CATALOG.map((item) => {
   const phrases = aliasesFor(item.id);
   const words = phrases.length > 0 ? ` | also: ${phrases.join(", ")}` : "";
-  const kind = item.requiresTemperature ? "needs temperature" : "snack";
+  const kind = item.requiresTemperature ? `needs temperature, best ${item.suits?.join("/") || "unknown"}` : "snack";
   return `${item.id} | ${item.name}${words} | ${kind} | ${item.tasteTags.join(", ")}`;
 }).join("\n");
 
@@ -37,6 +37,7 @@ const PROMPT = [
   "action set_quantity: set one cart line to the spoken count, from 1 to 9.",
   "action set_temperature: set hot, iced, or room on a drink already in the cart.",
   "action clarify: two or more products fit and you cannot tell which. Put those ids in choices. Do not add.",
+  "action suggest: they want a suggestion, or describe a taste, mood or need (warm, cold, tired, light, a treat) without naming a product. Put up to 3 fitting productIds from the customer's Machine only in choices. Never add.",
   "action menu: they asked to see coffee or snacks, without naming one product.",
   "action none: nothing on the menu fits, or the request is not a cart change. Leave lines and choices empty.",
   "temperature is hot, iced, or room only when they said it and the item needs a temperature. Otherwise none.",
@@ -53,6 +54,7 @@ export function parseHeard(value: unknown): Heard | null {
   if (
     action !== "add" &&
     action !== "clarify" &&
+    action !== "suggest" &&
     action !== "menu" &&
     action !== "none" &&
     action !== "clear" &&
@@ -102,6 +104,23 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
       ui: null,
     };
   }
+  if (heard.action === "suggest") {
+    // The model may only point at this machine's items. Nothing is added; prices come from the catalog.
+    const items = heard.choices.flatMap((id) => {
+      const item = getItem(id);
+      return item && item.machineId === session.machineId ? [item] : [];
+    }).slice(0, 3);
+    if (items.length === 0) return null;
+    const stayed = apply(session, { type: "activity", now });
+    return {
+      session: stayed.session,
+      say: t(langOf(stayed.session), "offer_list", { list: pricedList(items, langOf(stayed.session)) }),
+      spotlightIds: items.map((item) => item.id),
+      readBack: null,
+      switchTo: null,
+      ui: null,
+    };
+  }
   if (heard.action === "clarify") {
     if (heard.choices.length === 1) {
       const only = heard.choices[0];
@@ -117,7 +136,7 @@ export function applyHeard(session: OrderSession, heard: Heard, now: number): Tu
     const shown = items.slice(0, 3);
     return {
       session: stayed.session,
-      say: t(langOf(stayed.session), "can_offer", { names: shown.map((item) => item.name).join(", ") }),
+      say: t(langOf(stayed.session), "can_offer", { names: pricedList(shown, langOf(stayed.session)) }),
       spotlightIds: shown.map((item) => item.id),
       readBack: null,
       switchTo: null,
@@ -193,7 +212,7 @@ export async function understandUtterance(session: OrderSession, text: string): 
       max_tokens: 300,
       messages: [
         { role: "system", content: PROMPT },
-        { role: "user", content: `Cart: ${cart}\nCustomer: ${text}` },
+        { role: "user", content: `Machine: ${session.machineId}\nCart: ${cart}\nCustomer: ${text}` },
       ],
       response_format: {
         type: "json_schema",

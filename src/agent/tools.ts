@@ -1,7 +1,9 @@
 import {
   aliasesFor,
+  boundMachineId,
   CATALOG,
   getItem,
+  isMachineBound,
   itemsForMachine,
   type CatalogItem,
   type MachineId,
@@ -15,7 +17,7 @@ import {
   type ReadBack,
   type RejectReason,
 } from "../order/engine";
-import { clearNoCue, clearYesCue, langOf, noMoreCue, t, tempLabel } from "../i18n";
+import { clearNoCue, clearYesCue, langOf, noMoreCue, t, tempLabel, type AppLanguage } from "../i18n";
 
 export const AGENT_TOOLS = ["search_menu", "add_to_cart", "set_temperature", "remove_line", "read_back"] as const;
 export type AgentToolName = (typeof AGENT_TOOLS)[number];
@@ -36,8 +38,23 @@ export function money(cents: number): string {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(cents / 100);
 }
 
-/** Both machines. A coffee order can also hold a snack. */
-export function searchCatalog(query: string): CatalogItem[] {
+/** "Latte for $3.75, Mocha for $4.00 or Spiced Chai for $3.75". Product names stay English. */
+export function pricedList(items: readonly CatalogItem[], language: AppLanguage): string {
+  const parts = items.map((item) => t(language, "price_for", { name: item.name, price: money(item.priceCents) }));
+  if (parts.length <= 1) return parts[0] ?? "";
+  return `${parts.slice(0, -1).join(", ")} ${t(language, "list_or")} ${parts[parts.length - 1]}`;
+}
+
+/**
+ * Menu search for named products.
+ * Bound unit (NEXT_PUBLIC_MACHINE_ID = coffee|snacks): only that catalog.
+ * Unset/empty demo: both catalogs so a laptop can add by name across machines.
+ */
+export function searchCatalog(query: string, machineId?: MachineId): CatalogItem[] {
+  const bound = boundMachineId();
+  if (bound) {
+    return searchMenu(machineId ?? bound, query);
+  }
   const seen = new Set<string>();
   return [...searchMenu("coffee", query), ...searchMenu("snacks", query)]
     .filter((item) => {
@@ -69,22 +86,23 @@ export function runTool(
   }
   if (name === "search_menu") {
     const stayed = apply(session, { type: "activity", now });
-    const hits = searchCatalog(String(args.query ?? ""));
+    const hits = searchCatalog(String(args.query ?? ""), session.machineId);
     const say =
       hits.length === 0
         ? t(langOf(session), "not_carried")
-        : t(langOf(session), "can_offer", {
-            names: hits
-              .slice(0, 3)
-              .map((item) => item.name)
-              .join(", "),
-          });
+        : t(langOf(session), "can_offer", { names: pricedList(hits.slice(0, 3), langOf(session)) });
     return effect(stayed, say, hits.map((item) => item.id), hits.length > 0);
   }
   if (name === "add_to_cart") {
     const temperature = isTemperature(args.temperature) ? args.temperature : undefined;
     const quantity = typeof args.quantity === "number" ? args.quantity : undefined;
     const productId = String(args.productId ?? "");
+    const item = getItem(productId);
+    // Bound unit: refuse a named item from the other catalog. Soft not_carried; cart unchanged.
+    if (isMachineBound() && item && item.machineId !== session.machineId) {
+      const stayed = apply(session, { type: "activity", now });
+      return effect(stayed, t(langOf(session), "not_carried"), [], false);
+    }
     const result = apply(session, {
       type: "add",
       productId,

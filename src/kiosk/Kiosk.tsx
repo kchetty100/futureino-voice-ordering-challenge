@@ -8,6 +8,7 @@ import {
   type CatalogItem,
   type MachineId,
   type Temperature,
+  boundMachineId,
 } from "../catalog/index";
 import { parseNavIntent, type UiCommand } from "../agent/nav";
 import { isClearYes, wantsChange, wantsNoMore } from "../agent/tools";
@@ -21,10 +22,15 @@ import styles from "./kiosk.module.css";
 type Screen = "attract" | "menu" | "review" | "pay";
 type Picker = { productId: string; lineId?: string };
 
+/** The machine's greeting: what it makes and, for drinks, the temperatures. */
+function welcomeKey(machineId: MachineId): "welcome_coffee" | "welcome_snacks" {
+  return machineId === "coffee" ? "welcome_coffee" : "welcome_snacks";
+}
+
 function retargetSay(current: string | null, next: AppLanguage): string | null {
   if (!current) return current;
-  if (APP_LANGUAGES.some((language) => t(language, "welcome_choose") === current)) {
-    return t(next, "welcome_choose");
+  for (const key of ["welcome_choose", "welcome_coffee", "welcome_snacks"] as const) {
+    if (APP_LANGUAGES.some((language) => t(language, key) === current)) return t(next, key);
   }
   if (APP_LANGUAGES.some((language) => t(language, "didnt_catch") === current)) {
     return t(next, "didnt_catch");
@@ -42,13 +48,31 @@ const LANGUAGES: { id: AppLanguage; code: string; label: string }[] = [
 
 const TEMP_IDS: Temperature[] = ["hot", "iced", "room"];
 
-/** Optional default / production bind. Attract always offers both machines for the demo picker. */
+const BOUND_MACHINE: MachineId | null = boundMachineId();
+const MACHINE_BOUND = BOUND_MACHINE != null;
+
+/** Bound unit catalog, or coffee fallback when the demo picker is active. */
 function defaultMachineId(): MachineId {
-  const raw = process.env.NEXT_PUBLIC_MACHINE_ID?.trim().toLowerCase();
-  return raw === "snacks" ? "snacks" : "coffee";
+  return BOUND_MACHINE ?? "coffee";
 }
 
 const DEFAULT_MACHINE: MachineId = defaultMachineId();
+
+/** Desktop / laptop kiosk (matches the CSS 840px breakpoint): split Menu with a side panel. */
+const WIDE_QUERY = "(min-width: 840px)";
+
+function useWide(): boolean {
+  // Menu only mounts client-side (after a tap), so read the width on first paint: no phone-layout flash.
+  const [wide, setWide] = useState(() => typeof window !== "undefined" && window.matchMedia(WIDE_QUERY).matches);
+  useEffect(() => {
+    const query = window.matchMedia(WIDE_QUERY);
+    const sync = () => setWide(query.matches);
+    sync();
+    query.addEventListener("change", sync);
+    return () => query.removeEventListener("change", sync);
+  }, []);
+  return wide;
+}
 
 function tempWord(language: AppLanguage, id: Temperature): string {
   return screenText(language, id);
@@ -117,9 +141,9 @@ export function Kiosk() {
   /** Bumped on every stop so an in-flight welcome line never plays over newer speech. */
   const welcomeSeq = useRef(0);
   /** Welcome audio per language, so Attract tap plays at once without waiting on TTS. */
-  const welcomeAudio = useRef(new Map<AppLanguage, ArrayBuffer>());
+  const welcomeAudio = useRef(new Map<string, ArrayBuffer>());
   /** One in-flight welcome TTS prefetch per language key. */
-  const welcomePrefetch = useRef(new Map<AppLanguage, Promise<ArrayBuffer | null>>());
+  const welcomePrefetch = useRef(new Map<string, Promise<ArrayBuffer | null>>());
   /** Speak TTS cache (read-back + ready_to_pay): `${cartVersion}|${language}|${say}` → audio bytes. */
   const readBackAudio = useRef(new Map<string, ArrayBuffer>());
   /** In-flight warm keyed by `${cartVersion}|${language}` (say unknown until warm returns). */
@@ -244,16 +268,16 @@ export function Kiosk() {
     }
   }
 
-  function welcomeCacheKey(language: AppLanguage, pinned: boolean): AppLanguage {
-    return pinned ? language : "en";
+  function welcomeCacheKey(language: AppLanguage, pinned: boolean, machineId: MachineId): string {
+    return `${machineId}|${pinned ? language : "en"}`;
   }
 
   /**
    * Fetch welcome TTS into welcomeAudio (no playback). Dedupes in-flight work per language.
    * Completing after leave Attract still caches — next tap / visit can use it.
    */
-  function loadWelcomeAudio(language: AppLanguage, pinned: boolean): Promise<ArrayBuffer | null> {
-    const key = welcomeCacheKey(language, pinned);
+  function loadWelcomeAudio(language: AppLanguage, pinned: boolean, machineId: MachineId): Promise<ArrayBuffer | null> {
+    const key = welcomeCacheKey(language, pinned, machineId);
     const cached = welcomeAudio.current.get(key);
     if (cached) return Promise.resolve(cached);
     const pending = welcomePrefetch.current.get(key);
@@ -263,7 +287,7 @@ export function Kiosk() {
         const arrive = await fetch("/api/arrive", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ intent: "welcome", ...(pinned ? { language } : {}) }),
+          body: JSON.stringify({ intent: "welcome", machine: machineId, ...(pinned ? { language } : {}) }),
         });
         if (!arrive.ok) return null;
         const state = (await arrive.json()) as ServerState;
@@ -293,9 +317,13 @@ export function Kiosk() {
   function prefetchWelcome(language: AppLanguage, pinned: boolean) {
     if (!soloRef.current) return;
     if (screenRef.current !== "attract") return;
-    const key = welcomeCacheKey(language, pinned);
-    if (welcomeAudio.current.has(key) || welcomePrefetch.current.has(key)) return;
-    void loadWelcomeAudio(language, pinned);
+    // Bound unit: its own greeting. Demo: both machines, so either card plays from cache.
+    const machines: MachineId[] = MACHINE_BOUND ? [DEFAULT_MACHINE] : ["coffee", "snacks"];
+    for (const machineId of machines) {
+      const key = welcomeCacheKey(language, pinned, machineId);
+      if (welcomeAudio.current.has(key) || welcomePrefetch.current.has(key)) continue;
+      void loadWelcomeAudio(language, pinned, machineId);
+    }
   }
 
   function readBackCacheKey(cartVersion: number, language: AppLanguage, say: string): string {
@@ -475,7 +503,7 @@ export function Kiosk() {
    * not after the session round trip. Cache / in-flight prefetch plays immediately; else generates.
    * Any later speech or stop cancels playback.
    */
-  function speakWelcome(language: AppLanguage, pinned: boolean) {
+  function speakWelcome(language: AppLanguage, pinned: boolean, machineId: MachineId) {
     stopPlayback();
     if (!soloRef.current) return;
     const mine = welcomeSeq.current;
@@ -489,7 +517,7 @@ export function Kiosk() {
     setSpeaking(true);
     void (async () => {
       try {
-        const bytes = await loadWelcomeAudio(language, pinned);
+        const bytes = await loadWelcomeAudio(language, pinned, machineId);
         if (!bytes || !still()) return quiet();
         await playBytes(bytes, still);
       } catch {
@@ -603,7 +631,9 @@ export function Kiosk() {
     if (!opts.keepVoice || state.say) {
       setSay(goingBack && !movedBack ? screenText(languageRef.current.language, "home_screen") : state.say);
     }
-    setSpotlightIds(state.spotlightIds);
+    // "No thanks" after an offer keeps the offer lit, so they can still pick from it.
+    const keepLit = state.spotlightIds.length === 0 && APP_LANGUAGES.some((language) => t(language, "no_problem") === state.say);
+    if (!keepLit) setSpotlightIds(state.spotlightIds);
     setHeard(typeof state.transcript === "string" && state.transcript ? state.transcript : null);
     if (!opts.keepVoice || state.speakTicket) beginSpeech(state, mine);
     return state;
@@ -842,27 +872,38 @@ export function Kiosk() {
   }, [orderOpen, screen, activityAt]);
 
   /**
-   * Demo Attract tap: paint menu + set machineId in the same gesture, kick welcome voice,
-   * then await session POST. Listening starts once the session is live.
+   * Start a machine from a tap — demo card, or the bound unit's single Start button.
+   * Must run inside the user gesture: browsers keep audio locked until one, so an
+   * effect-driven auto-start would paint the menu with a silent welcome and prompts.
+   * Paint menu + set machineId, kick welcome voice, then await session POST.
    */
   function beginFromMachine(machineId: MachineId) {
+    // Unlock playback first, synchronously inside the tap gesture.
+    void audioContext().resume();
     paused.current = false;
     setHeard(null);
     const choice = languageRef.current;
-    setSay(t(choice.language, "welcome_choose"));
+    setSay(t(choice.language, welcomeKey(machineId)));
     // Optimistic menu: do not gate paint on the session round trip.
     setOpening(true);
     setMenu(machineId);
     setShowMenu(true);
     show("menu");
-    // Unlock playback inside the tap gesture; welcome TTS runs beside the session POST.
-    void audioContext().resume();
-    speakWelcome(choice.language, choice.pinned);
+    // Welcome TTS runs beside the session POST.
+    speakWelcome(choice.language, choice.pinned, machineId);
     void (async () => {
       await start(machineId);
       setOpening(false);
       if (liveSessionId.current) talk.start();
     })();
+  }
+
+  /** Demo-only header tabs: hop machines while the cart is empty (bound units never get tabs). */
+  function switchMachine(machineId: MachineId) {
+    if (MACHINE_BOUND || machineId === menu || opening) return;
+    if ((session?.lines.length ?? 0) > 0) return;
+    stopTalkRef.current();
+    beginFromMachine(machineId);
   }
 
   function onTalk() {
@@ -883,7 +924,15 @@ export function Kiosk() {
 
   let body: ReactNode;
   if (screen === "attract") {
-    body = (
+    // Bound unit: one Start tap (unlocks audio); demo: the two-card machine picker.
+    body = MACHINE_BOUND ? (
+      <BoundAttract
+        notice={notice}
+        language={language}
+        onChooseLanguage={chooseLanguage}
+        onStart={() => beginFromMachine(DEFAULT_MACHINE)}
+      />
+    ) : (
       <Attract
         say={say}
         heard={heard}
@@ -961,12 +1010,21 @@ export function Kiosk() {
         onSetTemp={(lineId, temperature) => void run({ type: "set_temperature", lineId, temperature })}
         onRemove={(lineId) => void run({ type: "remove_line", lineId })}
         onReview={() => void run({ type: "read_back" })}
+        onSwitchMachine={MACHINE_BOUND ? undefined : switchMachine}
+        onChooseLanguage={chooseLanguage}
         thinking={thinking}
         language={language}
       />
     );
   } else if (!orderLive || !session) {
-    body = (
+    body = MACHINE_BOUND ? (
+      <BoundAttract
+        notice={notice}
+        language={language}
+        onChooseLanguage={chooseLanguage}
+        onStart={() => beginFromMachine(DEFAULT_MACHINE)}
+      />
+    ) : (
       <Attract
         say={say}
         heard={heard}
@@ -1000,6 +1058,8 @@ export function Kiosk() {
         onSetTemp={(lineId, temperature) => void run({ type: "set_temperature", lineId, temperature })}
         onRemove={(lineId) => void run({ type: "remove_line", lineId })}
         onReview={() => void run({ type: "read_back" })}
+        onSwitchMachine={MACHINE_BOUND ? undefined : switchMachine}
+        onChooseLanguage={chooseLanguage}
         thinking={thinking}
         language={language}
       />
@@ -1100,9 +1160,10 @@ const ATTRACT_PICKS: { id: MachineId; image: string; blurb: "coffee_blurb" | "sn
 ];
 
 /**
- * Demo home screen. The machine cards are the only real start: whole card / Start Order →
- * onSelectMachine (Engineer's beginFromMachine: optimistic menu + welcome + listening).
- * Attract orb never opens the mic — early tap only nudges “Pick a machine below”. Label is “Choose a machine”, not Tap/Speak.
+ * Demo home screen (shown only when NEXT_PUBLIC_MACHINE_ID is unset/empty).
+ * The machine cards are the only real start: whole card / Start Order → onSelectMachine
+ * (beginFromMachine: optimistic menu + welcome + listening). Orb never opens the mic —
+ * early tap only nudges “Pick a machine below”. Bound units show BoundAttract instead.
  */
 function Attract({
   say,
@@ -1248,6 +1309,71 @@ function Attract({
   );
 }
 
+/**
+ * Bound-unit home screen (NEXT_PUBLIC_MACHINE_ID=coffee|snacks): logo + language chips and
+ * one primary Start button, no machine cards. The tap is the user gesture that unlocks
+ * audio, so the welcome and later prompts can play — never auto-start without it.
+ */
+function BoundAttract({
+  notice,
+  language,
+  onChooseLanguage,
+  onStart,
+}: {
+  notice: string | null;
+  language: AppLanguage;
+  onChooseLanguage: (language: AppLanguage) => void;
+  onStart: () => void;
+}) {
+  const label = screenText(language, "tap_to_start");
+  return (
+    <div className={styles.attract}>
+      <header className={styles.attractHead}>
+        <div className={styles.brand}>
+          <img className={styles.brandLogo} src="/brand/futureino-logo-clear.png" alt="Futureino" />
+          <span className={styles.brandTag}>{screenText(language, "smart_kiosk")}</span>
+        </div>
+        <div className={styles.langChips} role="group" aria-label={screenText(language, "language")}>
+          {LANGUAGES.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              lang={option.id}
+              className={option.id === language ? styles.langChipOn : styles.langChip}
+              aria-pressed={option.id === language}
+              aria-label={option.label}
+              title={option.label}
+              onClick={() => onChooseLanguage(option.id)}
+            >
+              {option.code}
+            </button>
+          ))}
+        </div>
+      </header>
+
+      <section className={`${styles.orbStage} ${styles.boundStage}`}>
+        <button
+          type="button"
+          className={styles.orb}
+          aria-label={label.replace(/\s+/g, " ")}
+          onClick={onStart}
+        >
+          <span className={styles.orbHalo} aria-hidden />
+          <span className={styles.orbCore}>
+            <span className={`${styles.orbLabel} ${styles.orbLabelLines}`}>{label}</span>
+          </span>
+        </button>
+      </section>
+
+      {notice ? (
+        <p className={styles.attractNotice} role="alert">
+          {notice}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 function Menu({
   session,
   menu,
@@ -1270,6 +1396,8 @@ function Menu({
   onSetTemp,
   onRemove,
   onReview,
+  onSwitchMachine,
+  onChooseLanguage,
   thinking,
   language,
 }: {
@@ -1295,10 +1423,13 @@ function Menu({
   onSetTemp: (lineId: string, temperature: Temperature) => void;
   onRemove: (lineId: string) => void;
   onReview: () => void;
+  onSwitchMachine?: (machineId: MachineId) => void;
+  onChooseLanguage: (language: AppLanguage) => void;
   thinking: boolean;
   language: AppLanguage;
 }) {
   const products = itemsForMachine(menu);
+  const wide = useWide();
   const lines = session?.lines ?? [];
   const missing = new Set(
     lines.filter((line) => getItem(line.productId)?.requiresTemperature && !line.temperature).map((line) => line.lineId),
@@ -1311,6 +1442,9 @@ function Menu({
   const gridRef = useRef<HTMLDivElement>(null);
   const spotlightKey = spotlightIds.join("|");
   const busy = thinking || opening || !session;
+  /** Lit offer in rank order (engine order), limited to this machine's grid — badge n = index + 1. */
+  const lit = spotlightIds.filter((id) => products.some((product) => product.id === id));
+  const showing = opening ? [] : lit.map((id) => products.find((product) => product.id === id)?.name ?? id);
 
   useEffect(() => {
     if (!spotlightIds.length || !gridRef.current) return;
@@ -1346,19 +1480,44 @@ function Menu({
 
   const total = session ? cartTotal(session) : 0;
   const networkFail = isNetworkNotice(notice);
+  // Desktop: controls (cart, Review, Start over, language) always visible in the side panel.
+  const showControls = controlsOpen || wide;
+  const tabs = wide && onSwitchMachine ? (Object.keys(MACHINES) as MachineId[]) : null;
+  const micMode = talkPhase === "off" ? "off" : speaking ? "speaking" : talkPhase === "thinking" ? "thinking" : "listening";
+  const micLabel = micMode === "off" ? screenText(language, "talk") : screenText(language, micMode);
 
   return (
     <div className={styles.menuView}>
       <header className={styles.topbar}>
         <div className={styles.menuBrand}>
           <img className={styles.menuLogo} src="/brand/futureino-logo-clear.png" alt="Futureino" />
-          <h2>{MACHINES[menu].name}</h2>
+          {tabs ? null : <h2>{MACHINES[menu].name}</h2>}
         </div>
+        {tabs ? (
+          <nav className={styles.machineTabs} aria-label="Machines">
+            {tabs.map((id) => (
+              <button
+                key={id}
+                type="button"
+                className={id === menu ? styles.machineTabOn : styles.machineTab}
+                aria-pressed={id === menu}
+                disabled={id !== menu && (busy || count > 0)}
+                onClick={() => {
+                  if (id !== menu) onSwitchMachine?.(id);
+                }}
+              >
+                {MACHINES[id].name}
+              </button>
+            ))}
+          </nav>
+        ) : null}
       </header>
-      <Reply say={say} heard={heard} language={language} />
+      <Reply say={say} heard={heard} language={language} showing={showing} />
       <div
         ref={gridRef}
-        className={thinking || opening ? `${styles.grid} ${styles.gridBusy}` : styles.grid}
+        className={[styles.grid, thinking || opening ? styles.gridBusy : "", showing.length ? styles.gridLit : ""]
+          .filter(Boolean)
+          .join(" ")}
         aria-busy={thinking || opening || undefined}
         data-opening={opening ? "true" : "false"}
       >
@@ -1370,12 +1529,19 @@ function Menu({
                 <div className={`${styles.skeletonLine} ${styles.skeletonLineShort}`} />
               </div>
             ))
-          : products.map((product) => (
+          : products.map((product) => {
+              const rank = lit.indexOf(product.id) + 1;
+              return (
               <article
                 key={product.id}
                 data-product-id={product.id}
-                className={spotlightIds.includes(product.id) ? `${styles.card} ${styles.spot}` : styles.card}
+                className={rank > 0 ? `${styles.card} ${styles.spot}` : styles.card}
               >
+                {rank > 0 ? (
+                  <span className={styles.spotBadge} aria-hidden>
+                    {rank}
+                  </span>
+                ) : null}
                 <img src={`/${product.imagePath}`} alt="" />
                 <span className={styles.cardName}>{product.name}</span>
                 <span className={styles.cardPrice}>{money(product.priceCents)}</span>
@@ -1390,7 +1556,8 @@ function Menu({
                     : screenText(language, "add")}
                 </button>
               </article>
-            ))}
+              );
+            })}
       </div>
       <footer className={styles.dock} aria-label="Cart" data-opening={opening ? "true" : "false"}>
         {count > 0 ? (
@@ -1404,11 +1571,21 @@ function Menu({
             {notice}
           </p>
         ) : null}
-        <div className={styles.voiceRow}>
-          <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact language={language} />
-          {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
-        </div>
-        {controlsOpen ? (
+        {wide ? (
+          <div className={styles.panelMic}>
+            <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} mic language={language} />
+            <p className={styles.panelMicLabel} aria-hidden>
+              {micLabel}
+            </p>
+            {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
+          </div>
+        ) : (
+          <div className={styles.voiceRow}>
+            <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} compact language={language} />
+            {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
+          </div>
+        )}
+        {showControls ? (
           <div className={styles.controlsPanel}>
             {count === 0 ? (
               <p className={styles.empty}>{screenText(language, "tap_add")}</p>
@@ -1526,16 +1703,30 @@ function Menu({
                 {screenText(language, "start_over")}
               </button>
             </div>
+            {wide ? (
+              <label className={styles.panelLang}>
+                <span>{screenText(language, "language")}</span>
+                <select value={language} onChange={(event) => onChooseLanguage(event.target.value as AppLanguage)}>
+                  {LANGUAGES.map((option) => (
+                    <option key={option.id} value={option.id} lang={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
           </div>
         ) : null}
-        <button
-          type="button"
-          className={styles.expandToggle}
-          aria-expanded={controlsOpen}
-          onClick={() => setControlsOpen((open) => !open)}
-        >
-          {controlsOpen ? screenText(language, "collapse") : screenText(language, "expand")}
-        </button>
+        {wide ? null : (
+          <button
+            type="button"
+            className={styles.expandToggle}
+            aria-expanded={controlsOpen}
+            onClick={() => setControlsOpen((open) => !open)}
+          >
+            {controlsOpen ? screenText(language, "collapse") : screenText(language, "expand")}
+          </button>
+        )}
       </footer>
     </div>
   );
@@ -1678,15 +1869,16 @@ function Review({
           <Talk phase={talkPhase} speaking={speaking} onToggle={onToggleTalk} language={language} />
           {talkPhase === "listening" ? <VoiceLine sample={voiceSample} language={language} /> : null}
         </div>
+        {/* Confirm is always on screen: the spoken read-back tells them to tap it. Back and Change stay behind Expand. */}
+        <button type="button" className={`${styles.primary} ${styles.reviewConfirm}`} onClick={onConfirm} disabled={thinking}>
+          {screenText(language, "confirm")}
+        </button>
         {controlsOpen ? (
           <div className={styles.controlsPanel}>
             <p className={styles.orSay}>{screenText(language, "say_back_page")}</p>
             <Composer onSend={onSend} disabled={thinking} modest language={language} />
             <button type="button" className={styles.ghost} onClick={onBack} disabled={thinking}>
               {screenText(language, "back")}
-            </button>
-            <button type="button" className={styles.primary} onClick={onConfirm} disabled={thinking}>
-              {screenText(language, "confirm")}
             </button>
             <button type="button" className={styles.ghost} onClick={onChange} disabled={thinking}>
               {screenText(language, "change_order")}
@@ -1874,14 +2066,31 @@ function PayMethodIcon({ kind }: { kind: "card" | "mobile" | "loyalty" }) {
 }
 
 
-function Reply({ say, heard, language }: { say: string | null; heard: string | null; language: AppLanguage }) {
-  if (!say && !heard) return null;
+function Reply({
+  say,
+  heard,
+  language,
+  showing = [],
+}: {
+  say: string | null;
+  heard: string | null;
+  language: AppLanguage;
+  /** Names of the lit offer, in spotlight order (Menu only). Product names stay English. */
+  showing?: string[];
+}) {
+  if (!say && !heard && showing.length === 0) return null;
   return (
     <div className={styles.say} role="status" aria-live="polite">
       {heard ? (
         <p className={styles.heard}>
           <span className={styles.chatTag}>{screenText(language, "you_tag")}</span>
           <span className={styles.chatText}>{heard}</span>
+        </p>
+      ) : null}
+      {showing.length ? (
+        <p className={styles.showing}>
+          <span aria-hidden>👉 </span>
+          {screenText(language, "showing", { names: showing.join(" · ") })}
         </p>
       ) : null}
       {say ? (

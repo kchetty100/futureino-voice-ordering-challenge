@@ -28,10 +28,12 @@ describe("customer phrases", () => {
     assert.match(black.say, /Daily Black/);
     assert.doesNotMatch(black.say, /Black Tea/);
 
-    const crunchy = answerWithRules(coffee(), "something crunchy", 4);
+    // Taste words list this machine's matches. Boost Coffee has nothing crunchy, so ask Snacks Bot.
+    const crunchy = answerWithRules(createSession({ id: "order-2", machineId: "snacks", now: 0 }), "something crunchy", 4);
     assert.equal(crunchy.session.lines.length, 0);
-    assert.match(crunchy.say, /I can offer/);
-    assert.doesNotMatch(crunchy.say, /doesn't carry/);
+    assert.match(crunchy.say, /You could go for/);
+    assert.doesNotMatch(crunchy.say, /doesn['’]t carry/);
+    assert.ok(crunchy.spotlightIds.every((id) => id.startsWith("snacks-")));
   });
 
   it("recognizes Hey Future for legacy wake clips only", () => {
@@ -181,7 +183,7 @@ describe("navigation phrases", () => {
 
     const coffeeScreen = answerWithRules(drafted.session, "coffee machine", 5);
     assert.equal(coffeeScreen.switchTo, null);
-    assert.equal(coffeeScreen.say, "Please view the items below.");
+    assert.equal(coffeeScreen.say, "Hi! I’m Boost. Coffee, tea, matcha or juice, hot, iced or room temp. What can I make you?");
 
     const wiped = answerWithRules(drafted.session, "remove everything from the cart", 6);
     assert.equal(wiped.session.lines.length, 0);

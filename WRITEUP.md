@@ -47,7 +47,7 @@ A short order (a few clips, a few spoken replies, one text pass) lands around a 
 
 - Product matching is still mostly English names and a short alias list. The five reply languages do not each have a full menu vocabulary.
 - A quiet room can still be heard as the wrong product name, and that name can still change the cart. A transcript of the speech hint is dropped, and so is a clip of the machine's own line. Nearby talk that is not an order leaves the cart alone. A one-letter miss of hot, cold, iced, or room is treated as that temperature.
-- The face model is downloaded from a CDN in the browser. The video stays on the device. With nobody in frame, the one-minute countdown starts after 10 seconds. With the camera blocked, still starting, or face detection not loaded, that countdown starts after three quiet minutes. A tap, a spoken turn, or a face clears it. The home screen does not count down.
+- The kiosk is mic-only (audio). There is no camera, face model, or CDN face leave. Walk-away is idle: after three quiet minutes with no order activity, a one-minute on-screen countdown runs, then the session ends. A tap or a spoken turn resets the quiet window. Attract (the home screen) does not count down.
 - Operator records in Redis expire after 7 days.
 - The order call returns the cart and the on-screen line before any audio. The voice is a second request, signed for that exact line and usable once. Hobby can still cut off the hearing call, or the extra text pass on an unclear sentence.
 - Payment is out of scope. The flow stops at pay.

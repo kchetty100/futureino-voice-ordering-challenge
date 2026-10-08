@@ -5,6 +5,7 @@ import { MACHINES, type CatalogItem, type MachineId } from "./types";
 
 export { COFFEE_ITEMS } from "./coffee";
 export { SNACK_ITEMS } from "./snacks";
+export { boundMachineId, isMachineBound } from "./bound";
 export {
   MACHINES,
   TASTE_TAGS,
@@ -44,6 +45,9 @@ for (const item of CATALOG) {
   }
   if (item.machineId === "snacks" && item.requiresTemperature) {
     throw new Error(`Snacks Bot items do not take a temperature: ${item.id}`);
+  }
+  if (item.requiresTemperature !== Array.isArray(item.suits)) {
+    throw new Error(`Drinks list the temperatures they suit; snacks do not: ${item.id}`);
   }
   if (item.nameBasis === "contents-hidden" && item.tasteTags.length > 0) {
     throw new Error(`Hidden contents cannot carry taste tags: ${item.id}`);

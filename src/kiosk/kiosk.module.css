@@ -82,46 +82,6 @@
   justify-content: center;
 }
 
-@media (min-width: 840px) {
-  /*
-   * Desktop demo: keep 430×920 layout, scale paint + layout box together
-   * so short windows don't scroll (like ~70% browser zoom). Never scale up past 1.
-   * Outer bezel size is 454×944 (12px border each side).
-   */
-  .frame {
-    align-items: center;
-    justify-content: center;
-    padding: 24px;
-    overflow: hidden;
-    min-height: 100dvh;
-  }
-
-  .shell {
-    --shell-scale: min(
-      1,
-      (100dvh - 48px) / 944px,
-      (100vw - 48px) / 454px
-    );
-    width: calc(454px * var(--shell-scale));
-    height: calc(944px * var(--shell-scale));
-    position: relative;
-    overflow: hidden;
-    flex: 0 0 auto;
-  }
-
-  .screen {
-    position: absolute;
-    left: 50%;
-    top: 50%;
-    width: 430px;
-    height: 920px;
-    border: 12px solid #0c0e11;
-    border-radius: 36px;
-    transform: translate(-50%, -50%) scale(var(--shell-scale));
-    transform-origin: center center;
-  }
-}
-
 .primary,
 .ghost,
 .temp,
@@ -374,6 +334,17 @@
   text-align: center;
   padding: 0 14px;
   text-shadow: 0 1px 8px rgba(10, 8, 40, 0.45);
+}
+
+/* Bound unit Attract: the single Start orb fills the space the machine cards used. */
+.boundStage {
+  flex: 1;
+  justify-content: center;
+}
+
+/* Bound Start label: chrome key carries a line break ("Tap to\nstart"). */
+.orbLabelLines {
+  white-space: pre-line;
 }
 
 .orbHint {
@@ -1166,7 +1137,9 @@
   border: 1px solid rgba(160, 175, 255, 0.16);
   text-align: left;
   color: var(--ink);
-  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease, transform 160ms ease;
+  position: relative;
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease, transform 160ms ease,
+    opacity 200ms ease;
 }
 
 .card.spot {
@@ -1179,6 +1152,75 @@
     0 8px 18px rgba(8, 12, 40, 0.4);
   transform: translateY(-1px);
   z-index: 1;
+}
+
+/* Offer chrome: while an offer is lit, the rest of the grid steps back. */
+.gridLit .card:not(.spot) {
+  opacity: 0.45;
+}
+
+/* Numbered offer badge (1–3, spotlight order), top start corner of a lit card. */
+.spotBadge {
+  position: absolute;
+  top: -4px;
+  inset-inline-start: -4px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--cyan, #4de8ff);
+  color: #06102a;
+  font-size: 12px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  box-shadow: 0 0 0 2px rgba(7, 11, 36, 0.9), 0 0 12px rgba(77, 232, 255, 0.6);
+  pointer-events: none;
+  animation: spotBadgeIn 180ms ease-out;
+}
+
+@keyframes spotBadgeIn {
+  from {
+    transform: scale(0.6);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* "Showing: A · B · C" chip at the top of the MACHINE bubble. */
+.showing {
+  margin: 0;
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(77, 232, 255, 0.12);
+  border: 1px solid rgba(77, 232, 255, 0.45);
+  color: var(--cyan, #4de8ff);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
+  }
+
+  .card.spot {
+    transform: none;
+  }
+
+  .spotBadge {
+    animation: none;
+  }
 }
 
 .card img {
@@ -1931,4 +1973,232 @@
   line-height: 1;
   color: var(--ink);
   background: transparent;
+}
+
+/*
+ * Desktop / laptop: full-bleed kiosk. The screen fills the browser window edge to
+ * edge (no phone bezel, no scaling). Backgrounds run full width; content sits in a
+ * centred column so lines and buttons stay a sane length. Phones (<840px) unchanged.
+ */
+@media (min-width: 840px) {
+  .frame {
+    height: 100dvh;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .shell {
+    width: 100%;
+    height: 100dvh;
+  }
+
+  .screen {
+    width: 100%;
+    height: 100dvh;
+  }
+
+  .attract,
+  .review,
+  .pay {
+    padding-left: max(28px, calc((100% - 760px) / 2));
+    padding-right: max(28px, calc((100% - 760px) / 2));
+  }
+
+  /*
+   * Menu split: header across the top, product grid left (only it scrolls),
+   * fixed talk panel right (mic, cart + Review, Start over, language, then YOU/MACHINE).
+   */
+  .menuView {
+    --panel: clamp(320px, 27vw, 400px);
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) var(--panel);
+    grid-template-rows: auto auto minmax(0, 1fr);
+    grid-template-areas:
+      "top top"
+      "grid dock"
+      "grid say";
+    background:
+      linear-gradient(to left, rgba(8, 12, 32, 0.94) var(--panel), transparent var(--panel)),
+      linear-gradient(
+        to left,
+        transparent var(--panel),
+        rgba(160, 175, 255, 0.18) var(--panel),
+        rgba(160, 175, 255, 0.18) calc(var(--panel) + 1px),
+        transparent calc(var(--panel) + 1px)
+      ),
+      radial-gradient(120% 55% at 40% 0%, rgba(77, 232, 255, 0.1), transparent 55%),
+      linear-gradient(170deg, #070b24 0%, #0f1540 42%, #1a1238 100%);
+  }
+
+  .menuView .topbar {
+    grid-area: top;
+    padding: 12px 28px;
+    background: rgba(7, 10, 30, 0.96);
+    border-bottom: 1px solid rgba(160, 175, 255, 0.16);
+  }
+
+  .menuView .menuBrand {
+    flex-direction: row;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .machineTabs {
+    display: flex;
+    gap: 8px;
+    margin: 0 auto;
+  }
+
+  .machineTab,
+  .machineTabOn {
+    min-height: 38px;
+    padding: 0 18px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 750;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .machineTab:hover:not(:disabled) {
+    color: var(--ink);
+    border-color: var(--line);
+  }
+
+  .machineTab:disabled {
+    opacity: 0.4;
+  }
+
+  .machineTabOn {
+    background: var(--cyan);
+    color: #06102a;
+  }
+
+  .menuView .grid {
+    grid-area: grid;
+    grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+    gap: 14px;
+    padding: 22px 28px 28px;
+  }
+
+  .menuView .dock {
+    grid-area: dock;
+    max-height: calc(100dvh - 180px);
+    overflow-y: auto;
+    border-top: 0;
+    background: transparent;
+    padding: 22px 22px 12px;
+    gap: 10px;
+  }
+
+  .menuView .say {
+    grid-area: say;
+    align-self: start;
+    max-height: calc(100% - 22px);
+    overflow-y: auto;
+    margin: 0 22px 22px;
+  }
+
+  .menuView .cartStatus {
+    display: none;
+  }
+
+  .menuView .controlsNav {
+    flex-direction: row;
+  }
+
+  .menuView .controlsNav > * {
+    flex: 1;
+  }
+
+  .panelMic {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 0 8px;
+    flex-shrink: 0;
+  }
+
+  .panelMic .talkMic {
+    width: 112px;
+    height: 112px;
+    min-height: 112px;
+    background: linear-gradient(145deg, #4de8ff 0%, #7b5cff 55%, #e94bff 100%);
+    box-shadow: 0 0 0 6px rgba(123, 92, 255, 0.18), 0 10px 32px rgba(123, 92, 255, 0.4);
+  }
+
+  .panelMic .talkMic.talkListening {
+    box-shadow: 0 0 0 8px rgba(77, 232, 255, 0.35), 0 0 40px rgba(77, 232, 255, 0.55);
+  }
+
+  .panelMic .talkMic.talkThinking {
+    background: #7a5a12;
+  }
+
+  .panelMic .talkMic.talkSpeaking {
+    background: var(--warn);
+  }
+
+  .panelMic .micIcon svg {
+    width: 44px;
+    height: 44px;
+  }
+
+  .panelMicLabel {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+  }
+
+  .panelLang {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--muted);
+  }
+
+  .panelLang select {
+    flex: 1;
+    max-width: 200px;
+    min-height: 36px;
+    padding: 0 10px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--ink);
+    font: inherit;
+  }
+
+  .machineArt {
+    aspect-ratio: 16 / 9;
+  }
+
+  .backdrop {
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+
+  .sheet {
+    max-width: 560px;
+    border-radius: 22px;
+    border: 1px solid rgba(160, 175, 255, 0.22);
+  }
+}
+
+/* Review: Confirm is always visible under the mic. */
+.reviewConfirm {
+  width: 100%;
+  margin-top: 12px;
+  min-height: 56px;
+  font-size: 18px;
 }

@@ -16,6 +16,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["plain", "strong", "bitter"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
   {
     id: "coffee-02",
@@ -29,6 +30,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["creamy", "sweet", "mild"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-03",
@@ -42,6 +44,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["sweet", "creamy", "mild"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
   {
     id: "coffee-04",
@@ -55,6 +58,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["creamy", "mild"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
   {
     id: "coffee-05",
@@ -69,6 +73,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["plain", "strong", "bitter"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-06",
@@ -82,6 +87,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["sweet", "chocolate", "rich"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-07",
@@ -95,6 +101,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["spiced", "sweet", "creamy"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-08",
@@ -108,6 +115,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["sweet", "rich", "creamy"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
   {
     id: "coffee-09",
@@ -121,6 +129,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["mild", "light"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
   {
     id: "coffee-10",
@@ -134,6 +143,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["fruity", "sweet"],
     allergens,
     requiresTemperature: true,
+    suits: ["iced"],
   },
   {
     id: "coffee-11",
@@ -147,6 +157,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["fruity", "sweet"],
     allergens,
     requiresTemperature: true,
+    suits: ["iced"],
   },
   {
     id: "coffee-12",
@@ -160,6 +171,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["fruity", "tart"],
     allergens,
     requiresTemperature: true,
+    suits: ["iced", "room"],
   },
   {
     id: "coffee-13",
@@ -173,6 +185,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["tart", "light"],
     allergens,
     requiresTemperature: true,
+    suits: ["iced", "hot"],
   },
   {
     id: "coffee-14",
@@ -186,6 +199,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["sweet", "chocolate", "rich"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-15",
@@ -200,6 +214,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: [],
     allergens,
     requiresTemperature: true,
+    suits: [],
   },
   {
     id: "coffee-16",
@@ -213,6 +228,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["plain", "light"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-17",
@@ -226,6 +242,7 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["strong", "bitter"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot"],
   },
   {
     id: "coffee-18",
@@ -239,5 +256,6 @@ export const COFFEE_ITEMS: readonly CatalogItem[] = [
     tasteTags: ["creamy", "mild"],
     allergens,
     requiresTemperature: true,
+    suits: ["hot", "iced"],
   },
 ];
